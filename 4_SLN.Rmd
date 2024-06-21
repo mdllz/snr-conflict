@@ -1,0 +1,893 @@
+```{r}
+library("ggplot2") # plots
+library("patchwork") # arranging plots
+library("dplyr") # data wrangling
+library("extraDistr") # truncated normal
+library("tidyr") # wide to long and vice versa
+library("stringr") # convert to capital letters with str_to_upper()
+library("scales") # plot labels formatting
+library("tidybayes") # geom_pointinterval
+library("parallel") # multi core computing
+library("rstan") # model fitting
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+```
+
+```{r 'snr-function'}
+sn_sln_analytical <- function(extracted_samples){
+  sigma_theta <- extracted_samples$theta_sigma
+  sigma <- sqrt(rowMeans(extracted_samples$sigma^2))
+  ratio_a <- sigma_theta/sigma
+  return(list(ratio_a = ratio_a,
+              sigma_theta = sigma_theta,
+              sigma = sigma))
+}
+```
+
+```{r 'ppcheck-functions'}
+
+plot_cdf_pp <- function(data, modelfit, npred = 500, subject = NULL, factors = NULL, stat = NULL, 
+                       stat_name = "", adjust = 1, ci = c(0.025, 0.5, 0.975), do_plot = TRUE, 
+                       xlim = NULL, ylim = NULL, layout = NULL, mfcol = TRUE, probs = c(1:99)/100, 
+                       data_lwd = 1, fit_lwd = 2, qp_cex = 1, q_points = c(0.1,0.3, 0.5, 0.7, 0.9), 
+                       pqp_cex = 0.5, lpos = "topleft", 
+                       signalFactor = "S", zROC = FALSE, qfun = qnorm, lim = NULL, 
+                       rocfit_cex = 0.5){
+  raw <- data
+  J <- data %>% group_by(subject) %>% count() %>% pull(n) %>% max()
+  I <- length(unique(data$subject))
+  data <- data %>% 
+  transmute(CT = as.factor(congruency),
+            rt = rt,
+            s = as.factor(data$subject),
+            R = as.factor(1)) %>% 
+    as.data.frame()
+  idx <- round(seq(from = 1, to = 4000, length.out = npred),0)
+  y_pred <- rstan::extract(modelfit, "y_pred")$y_pred[idx,]
+  
+  pp_dat2 <- y_pred %>% 
+    as.data.frame() %>% 
+    tidyr::pivot_longer(names_to = "obs", values_to = "rt", cols = everything()) %>% 
+    mutate(pp = rep(1:npred, each = nrow(data)),
+           s = rep(raw$subject, times = npred),
+           cond= rep(data$CT, times = npred)) %>% 
+    as.data.frame()
+ 
+# postn [1:nsamps] CT [0,1] R [1,2] rt [in sec]
+  pp <- pp_dat2 %>% 
+    transmute(postn = pp,
+              CT = as.factor(cond),
+              R = as.factor(1),
+              rt = rt) %>% 
+    as.data.frame()
+
+  if (!is.null(subject)) {
+    snams <- levels(data$subjects)
+    if (is.numeric(subject)){ 
+      subject <- snams[subject]
+      dat <- droplevels(data[data$subjects %in% subject, ])
+      pp <- droplevels(pp[pp$subjects %in% subject, ])
+    }
+    if (subject == "none"){
+      dat <- data
+      fnams <- names(dat)[!(names(dat) %in% c("subjects", "trials", "R", 
+                                              "rt"))]
+    }
+    else if (!all(subject %in% snams)) 
+      stop("Subject(s) not present\n")
+    if (length(subject) > 1)
+      fnams <- names(dat)[!(names(dat) %in% c("trials", 
+                                              "R", "rt"))]
+    else fnams <- names(dat)[!(names(dat) %in% c("subjects", 
+                                                 "trials", "R", "rt"))]
+  } 
+  else {
+    dat <- data
+    fnams <- names(dat)[!(names(dat) %in% c("trials", "R", 
+                                            "rt"))]
+  }
+  if (!is.null(factors)) {
+    if (!all(factors %in% fnams)) 
+      stop("factors must name factors in data")
+    fnams <- factors
+  }
+  if (!is.null(layout)) 
+    if (mfcol) par(mfcol = layout)
+  else par(mfrow = layout)
+  if (all(is.na(data$rt))) {
+    if (length(levels(data$R)) == 2 & is.null(stat)) 
+      stop("No plots for binary responses, use an accuracy function in stat argument.")
+    if (!is.null(stat)) {
+      cells <- dat[, fnams, drop = FALSE]
+      for (i in fnams) cells[, i] <- paste(i, cells[, i], 
+                                           sep = "=")
+      cells <- apply(cells, 1, paste, collapse = " ")
+      pp_cells <- pp[, fnams, drop = FALSE]
+      for (i in fnams) pp_cells[, i] <- paste(i, pp_cells[, 
+                                                          i], sep = "=")
+      pp_cells <- apply(pp_cells, 1, paste, collapse = " ")
+      postn <- unique(pp$postn)
+      ucells <- sort(unique(cells))
+      tab <- matrix(nrow = length(ucells), ncol = 4, dimnames = list(ucells, 
+                                                                     c("Observed", names(quantile(1:5, ci)))))
+      for (i in ucells) {
+        obs <- stat(dat[cells == i, ])
+        ppi <- pp[pp_cells == i, ]
+        pred <- sapply(postn, function(x) {
+          stat(ppi[ppi$postn == x, ])
+        })
+        if (do_plot) {
+          dens <- density(pred, adjust = adjust)
+          if (!is.null(xlim)) 
+            xlimi <- xlim
+          else xlimi <- c(pmin(obs, min(dens$x)), pmax(obs, 
+                                                       max(dens$x)))
+          plot(dens, main = i, xlab = stat_name, xlim = xlimi)
+          abline(v = obs)
+        }
+        tab[i, ] <- c(obs, quantile(pred, ci))
+      }
+      invisible(tab)
+    }
+    else {
+      if (!any(fnams == signalFactor)) 
+        stop("Data does not have a column specified in the signalFactor argument: ", 
+             signalFactor)
+      if (length(levels(data[[signalFactor]])) != 2) 
+        stop("signalFactor must have exactly two levels for an ROC plot")
+      if (zROC & is.null(qfun)) 
+        stop("Must supply qfun for zROC")
+      fnams <- fnams[fnams != signalFactor]
+      cells <- dat[, fnams, drop = FALSE]
+      for (i in fnams) cells[, i] <- paste(i, cells[, i], 
+                                           sep = "=")
+      cells <- apply(cells, 1, paste, collapse = " ")
+      pp_cells <- pp[, fnams, drop = FALSE]
+      for (i in fnams) pp_cells[, i] <- paste(i, pp_cells[, 
+                                                          i], sep = "=")
+      pp_cells <- apply(pp_cells, 1, paste, collapse = " ")
+      postn <- unique(pp$postn)
+      ucells <- sort(unique(cells))
+      for (i in ucells) {
+        dpts <- plot_roc(dat[cells == i, ], zROC = zROC, 
+                         qfun = qfun, lim = lim, main = i, signalFactor = signalFactor)
+        tab <- table(pp[pp_cells == i, ]$postn, pp[pp_cells == 
+                                                     i, ]$R, pp[pp_cells == i, ][[signalFactor]])
+        ctab <- apply(tab, 1, function(x) {
+          list(1 - apply(t(x)/apply(x, 2, sum), 1, cumsum)[-dim(x)[1], 
+          ])
+        })
+        if (!zROC) 
+          lapply(ctab, function(x) {
+            points(x[[1]][, 1], x[[1]][, 2], col = "grey", 
+                   pch = 16, cex = rocfit_cex)
+          })
+        else ctab <- lapply(ctab, function(x) {
+          x[[1]] <- qnorm(x[[1]])
+          points(x[[1]][row.names(dpts), 1], x[[1]][row.names(dpts), 
+                                                    2], col = "grey", pch = 16, cex = rocfit_cex)
+        })
+        points(dpts[, 1], dpts[, 2])
+        lines(dpts[, 1], dpts[, 2])
+      }
+    }
+  }
+  else {
+    cells <- dat[, fnams, drop = FALSE]
+    for (i in fnams) cells[, i] <- paste(i, cells[, i], sep = "=")
+    cells <- apply(cells, 1, paste, collapse = " ")
+    pp_cells <- pp[, fnams, drop = FALSE]
+    for (i in fnams) pp_cells[, i] <- paste(i, pp_cells[, 
+                                                        i], sep = "=")
+    pp_cells <- apply(pp_cells, 1, paste, collapse = " ")
+    if (!is.null(stat)) {
+      postn <- unique(pp$postn)
+      ucells <- sort(unique(cells))
+      tab <- matrix(nrow = length(ucells), ncol = 4, dimnames = list(ucells, 
+                                                                     c("Observed", names(quantile(1:5, ci)))))
+      for (i in ucells) {
+        obs <- stat(dat[cells == i, ])
+        ppi <- pp[pp_cells == i, ]
+        pred <- sapply(postn, function(x) {
+          stat(ppi[ppi$postn == x, ])
+        })
+        if (do_plot) {
+          dens <- density(pred, adjust = adjust)
+          if (!is.null(xlim)) 
+            xlimi <- xlim
+          else xlimi <- c(pmin(obs, min(dens$x)), pmax(obs, 
+                                                       max(dens$x)))
+          plot(dens, main = i, xlab = stat_name, xlim = xlimi)
+          abline(v = obs)
+        }
+        tab[i, ] <- c(obs, quantile(pred, ci))
+      }
+      invisible(tab)
+    }
+    else {
+      pok <- probs %in% q_points
+      R <- levels(dat$R)
+      if (is.null(ylim)) 
+        ylim <- c(0, 1)
+      if (is.null(xlim)) {
+        xlim <- c(Inf, -Inf)
+        for (i in sort(unique(cells))) {
+          dati <- dat[cells == i, ]
+          ppi <- pp[pp_cells == i, ]
+          pR <- table(dati$R)/dim(dati)[1]
+          pqs <- pq <- qs <- setNames(vector(mode = "list", 
+                                             length = length(R)), R)
+          for (j in R) if (length(dati$rt[dati$R == j]) >= 
+                           length(q_points)) {
+            qs[[j]] <- quantile(dati$rt[dati$R == j], 
+                                probs = probs)
+            pq[[j]] <- quantile(ppi$rt[ppi$R == j], probs = probs)
+            pqs[[j]] <- tapply(ppi$rt[ppi$R == j], ppi$postn[ppi$R == 
+                                                               j], quantile, probs = probs[pok])
+          }
+          else qs[[j]] <- pq[[j]] <- pqs[[j]] <- NA
+          rx <- cbind(do.call(rbind, lapply(qs, function(x) {
+            x[c(1, length(probs))]
+          })), do.call(rbind, lapply(pq, function(x) {
+            x[c(1, length(probs))]
+          })))
+          xlimi <- c(min(rx, na.rm = TRUE), max(rx, na.rm = TRUE))
+          if (!any(is.na(xlimi))) {
+            xlim[1] <- pmin(xlim[1], xlimi[1])
+            xlim[2] <- pmax(xlim[2], xlimi[2])
+          }
+        }
+      }
+      for (i in sort(unique(cells))) {
+        title <- ifelse(i==sort(unique(cells))[1], "Congruent",
+                        "Incongruent")
+        dati <- dat[cells == i, ]
+        ppi <- pp[pp_cells == i, ]
+        pR <- table(dati$R)/dim(dati)[1]
+        pqs <- pq <- qs <- setNames(vector(mode = "list", 
+                                           length = length(R)), R)
+        ppR <- pR
+        ppR[1:length(pR)] <- 0
+        for (j in R) if (length(dati$rt[dati$R == j]) >= 
+                         length(q_points)) {
+          isj <- ppi$R == j
+          qs[[j]] <- quantile(dati$rt[dati$R == j], probs = probs)
+          pq[[j]] <- quantile(ppi$rt[isj], probs = probs)
+          pqs[[j]] <- tapply(ppi$rt[isj], ppi$postn[isj], 
+                             quantile, probs = probs[pok])
+          ppR[j] <- mean(isj)
+        }
+        else qs[[j]] <- pq[[j]] <- pqs[[j]] <- NA
+        if (!any(is.na(pq[[1]]))) {
+          par(mar=c(3,4,2,0) + 0.1)
+          plot(pq[[1]], probs * ppR[1], xlim = xlim, 
+               ylim = ylim, main = title, xlab = "", type = "l", col = "#3182bd",
+               lwd = fit_lwd, ylab = "", lty = 1, axes=FALSE)
+          axis(1, padj = -0.8)
+          axis(2, las=1, hadj = 0.8)
+          title(xlab = "RT", line=1.5)
+          title(line=2.5, ylab = "Cumulative probability")
+          tmp = lapply(pqs[[1]], function(x) {
+            points(x, probs[pok] * ppR[1], col = "#3182bd", 
+                   pch = 16, cex = pqp_cex)
+          })
+          points(pq[[1]][pok], probs[pok] * ppR[1], cex = pqp_cex * 
+                   3, pch = 16, col = "#3182bd")
+          lines(qs[[1]], probs * pR[1], lwd = data_lwd, 
+                lty = 1, col = "#c51b8a")
+          points(qs[[1]][pok], probs[pok] * pR[1], cex = qp_cex, 
+                 pch = 16, col = "#c51b8a")
+          do_plot = FALSE
+        }
+        else do_plot = TRUE
+        if (length(qs) > 1) {
+          for (j in 2:length(qs)) if (!any(is.na(pq[[j]]))) {
+            if (do_plot) {
+              plot(pq[[j]], probs * ppR[j], xlim = xlim, 
+                   ylim = ylim, main = title, xlab = "RT", type = "l", 
+                   lwd = fit_lwd, ylab = "Cumulative probability", lty = j,
+                   col = "#c51b8a")
+              do_plot <- FALSE
+            }
+            else lines(pq[[j]], probs * ppR[j], lwd = fit_lwd, 
+                       lty = j, col= "#3182bd")
+            tmp = lapply(pqs[[j]], function(x) {
+              points(x, probs[pok] * ppR[j], col = "#3182bd", 
+                     pch = 16, cex = pqp_cex)
+            })
+            points(pq[[j]][pok], probs[pok] * ppR[j], 
+                   cex = pqp_cex * 3, pch = 16, col = "#3182bd")
+            lines(qs[[j]], probs * pR[j], lwd = data_lwd, 
+                  lty = j, col = "#c51b8a")
+            points(qs[[j]][pok], probs[pok] * pR[j], 
+                   cex = qp_cex, pch = 16, col = "#c51b8a")
+          }
+        }
+      }
+    }
+  }
+}
+
+
+# individual pp checks
+individual_pp_check <- function(data, modelfit, npred = 500){
+  raw <- data
+  J <- data %>% group_by(subject) %>% count() %>% pull(n) %>% max()
+  I <- length(unique(data$subject))
+  data <- data %>% 
+    transmute(CT = as.factor(congruency),
+              rt = rt,
+              s = as.factor(data$subject),
+              R = as.factor(1)) %>% 
+    as.data.frame()
+  idx <- round(seq(from = 1, to = 4000, length.out = npred),0)
+  y_pred <- rstan::extract(modelfit, "y_pred")$y_pred[idx,]
+  
+  pp_dat2 <- y_pred %>% 
+    as.data.frame() %>% 
+    tidyr::pivot_longer(names_to = "obs", values_to = "rt", cols = everything()) %>% 
+    mutate(pp = rep(1:npred, each = nrow(data)),
+           s = rep(raw$subject, times = npred),
+           cond= rep(data$CT, times = npred)) %>% 
+    group_by(s) %>% 
+    mutate(s = cur_group_id()) %>% 
+    ungroup() %>% 
+    as.data.frame()
+  
+  pp_deciles <- pp_dat2 %>% 
+    mutate(congruency = as.factor(ifelse(cond == 1, -0.5, 0.5))) %>% 
+    group_by(s, congruency) %>% 
+    summarize(q10 = quantile(rt, probs = 0.1),
+              q20 = quantile(rt, probs = 0.2),
+              q30 = quantile(rt, probs = 0.3),
+              q40 = quantile(rt,  probs = 0.4),
+              q50 = median(rt),
+              q60 = quantile(rt,  probs = 0.6),
+              q70= quantile(rt,  probs = 0.7),
+              q80 = quantile(rt,  probs = 0.8),
+              q90 = quantile(rt,  probs = 0.9)) %>% 
+    pivot_longer(names_to = "decile", values_to = "rt", cols = q10:q90)
+  
+  pp_deciles_obs <- raw %>% 
+    mutate(congruency = as.factor(ifelse(congruency == 1, -0.5, 0.5))) %>% 
+    group_by(subject) %>% 
+    mutate(s = cur_group_id()) %>% 
+    group_by(s, congruency) %>% 
+    summarize(q10 = quantile(rt, probs = 0.1),
+              q20 = quantile(rt, probs = 0.2),
+              q30 = quantile(rt, probs = 0.3),
+              q40 = quantile(rt,  probs = 0.4),
+              q50 = median(rt),
+              q60 = quantile(rt,  probs = 0.6),
+              q70= quantile(rt,  probs = 0.7),
+              q80 = quantile(rt,  probs = 0.8),
+              q90 = quantile(rt,  probs = 0.9))%>% 
+    pivot_longer(names_to = "decile", values_to = "rt_obs", cols = q10:q90)
+  
+  qq_sln_c <- left_join(pp_deciles_obs, pp_deciles) %>% 
+    filter(congruency == -0.5) %>% 
+    ggplot(aes(rt_obs, rt, label = s)) +
+    geom_point() +
+    geom_abline(intercept =0 , slope = 1) +
+    facet_wrap(~decile)+
+    ggtitle("Congruent", subtitle = "Individual observed and predicted response times across quantiles")+
+    labs(y = "Response Time (Predicted)", x = "Response Time (Observed)")+
+    theme_bw()
+  
+  qq_sln_ic <- left_join(pp_deciles_obs, pp_deciles) %>% 
+    filter(congruency == 0.5) %>% 
+    ggplot(aes(rt_obs, rt, label = s)) +
+    geom_point() +
+    geom_abline(intercept =0 , slope = 1) +
+    facet_wrap(~decile) +
+    ggtitle("Incongruent", subtitle = "Individual observed and predicted response times across quantiles") +
+    labs(y = "Response Time (Predicted)", x = "Response Time (Observed)") +
+    theme_bw()
+  
+  return(list(congruent = qq_sln_c,
+              incongruent = qq_sln_ic))
+}
+```
+
+
+```{r 'vonBastian-SLN-fitting'}
+vonbastian <- read.csv("cleaned_data/vonbastianetal_2016.csv") %>% 
+  # only correct values
+  filter(accuracy == 1)
+
+trialsum_vonbastian <- vonbastian %>% 
+  group_by(subject) %>% 
+  count() %>% 
+  pull(n)
+ 
+I_vonbastian <- length(unique(vonbastian$subject))
+ from_vonbastian <- numeric(I_vonbastian)
+ for(i in 1:I_vonbastian){
+  if(i == 1){
+    from_vonbastian[i] = 1;
+  } else {
+    from_vonbastian[i] = cumsum(trialsum_vonbastian)[i-1] + 1;
+  }
+ }
+ 
+ dat_vonbastian <- vonbastian %>% 
+   select(rt,accuracy,congruency) %>%
+   mutate(accuracy = ifelse(accuracy == 1, 1, 2),
+          congruency = ifelse(congruency == 1, -0.5, 0.5)) %>% 
+   as.matrix()
+ 
+ subj <- vonbastian %>% 
+   group_by(subject) %>% 
+   mutate(subj = cur_group_id())
+ 
+start_values <- function(){list(psi_mu = runif(1, 0.1, 0.2),
+                psi_sigma = runif(1, 0.01, 0.05),
+                psi = rep(times = I_vonbastian, runif(1, 0.1, 0.2),
+                alpha_mu = exp(runif(1, -1,0.5)),
+                alpha_sigma = exp(runif(1, -1, 0.5)),
+                theta_sigma = exp(runif(1, -1, 0.5)),
+                theta_mu = exp(runif(1, -1, 1)),
+                alpha = exp(rep(times = I_vonbastian, runif(1, -2, 1))),
+                theta = rep(times = I_vonbastian, runif(1, -1, 1)),
+                sigma = rep(times = I_vonbastian, runif(1, -0.5, 0)),
+                sigma_sigma = exp(runif(1, -1, 0.5)),
+                sigma_mu = exp(runif(1, -1, 0.5))))} 
+
+ 
+data_vB <- list(N = nrow(vonbastian), I = I_vonbastian, K = 2, Y = dat_vonbastian, 
+                J = max(trialsum_vonbastian), 
+                trialsum = trialsum_vonbastian, idx_start = from_vonbastian, subj = subj$subj) 
+ 
+stan_sln_vB <- rstan::stan("stan_models/sln.stan", data = data_vB, init = start_values, 
+                               iter = 3000, warmup = 2000, chains = 4, 
+                               control = list(adapt_delta = 0.98, stepsize = 0.4))
+
+saveRDS(stan_sln_vB, "output/SLN/sln_vonbastian.RDS")
+
+sln_extract_vB <- rstan::extract(stan_sln_vB, pars = c("mu_c", "mu_ic", "sigma", "theta_sigma"))
+
+trialnr_vB <- vonbastian %>% 
+  filter( accuracy == 1) %>% # only correct trials as stroop effect is only on correct drift
+  mutate(cond = ifelse(congruency == 1, "c", "inc")) %>% 
+  group_by(subject, cond) %>% 
+  count()
+
+#save(sln_extract_vB, trialnr_vB, file="output/SLN/sln_samples_vB.RData")
+
+# posterior predictive checks ---------------------------------------------------
+
+pdf(file = "output/SLN/plot_cdf_pp_sln_vonbastian.pdf", width = 7, height = 3.5)
+par(mfrow=c(1,2))    
+plot_cdf_pp(vonbastian, stan_sln_vB, subject = "none", factors = "CT", 
+          layout = NULL, xlim = c(0,5))
+dev.off()
+
+individual_pp_vB <- individual_pp_check(vonbastian, stan_sln_vB)
+ggsave("output/SLN/ind_sln_c_vB.pdf",individual_pp_vB$congruent, height = 5.8, width = 5.2, dev = cairo_pdf)
+ggsave("output/SLN/ind_sln_ic_vB.pdf",individual_pp_vB$incongruent, height = 5.8, width = 5.2, dev = cairo_pdf)
+
+
+```
+
+
+```{r 'reymermet-SLN-fitting'}
+reymermet <- read.csv("cleaned_data/reymermetetal_2018.csv") %>% 
+  # only correct values
+  filter(accuracy == 1)
+
+trialsum_reymermet <- reymermet %>% 
+  group_by(subject) %>% 
+  count() %>% 
+  pull(n)
+ 
+I_reymermet <- length(unique(reymermet$subject))
+ from_reymermet <- numeric(I_reymermet)
+ for(i in 1:I_reymermet){
+  if(i == 1){
+    from_reymermet[i] = 1;
+  } else {
+    from_reymermet[i] = cumsum(trialsum_reymermet)[i-1] + 1;
+  }
+ }
+ 
+ dat_reymermet <- reymermet %>% 
+   select(rt,accuracy,congruency) %>%
+   mutate(accuracy = ifelse(accuracy == 1, 1, 2),
+          congruency = ifelse(congruency == 1, -0.5, 0.5)) %>% 
+   as.matrix()
+ 
+ subj <- reymermet %>% 
+   group_by(subject) %>% 
+   mutate(subj = cur_group_id())
+ 
+start_values <- function(){list(psi_mu = runif(1, 0.1, 0.2),
+                psi_sigma = runif(1, 0.01, 0.05),
+                psi = rep(times = I_reymermet, runif(1, 0.1, 0.2),
+                alpha_mu = exp(runif(1, -1,0.5)),
+                alpha_sigma = exp(runif(1, -1, 0.5)),
+                theta_sigma = exp(runif(1, -1, 0.5)),
+                theta_mu = exp(runif(1, -1, 1)),
+                alpha = exp(rep(times = I_reymermet, runif(1, -2, 1))),
+                theta = rep(times = I_reymermet, runif(1, -1, 1)),
+                sigma = rep(times = I_reymermet, runif(1, -0.5, 0)),
+                sigma_sigma = exp(runif(1, -1, 0.5)),
+                sigma_mu = exp(runif(1, -1, 0.5))))} 
+
+ 
+data_RMy <- list(N = nrow(reymermet), I = I_reymermet, K = 2, Y = dat_reymermet, 
+                J = max(trialsum_reymermet), 
+                trialsum = trialsum_reymermet, idx_start = from_reymermet, subj = subj$subj) 
+ 
+stan_sln_RMy <- rstan::stan("stan_models/sln.stan", data = data_RMy, init = start_values, 
+                               iter = 3000, warmup = 2000, chains = 4, 
+                               control = list(adapt_delta = 0.98, stepsize = 0.4))
+
+saveRDS(stan_sln_RMy, "output/SLN/sln_reymermet.RDS")
+
+sln_extract_RMy <- rstan::extract(stan_sln_RMy, pars = c("mu_c", "mu_ic", "sigma", "theta_sigma"))
+
+trialnr_RMy <- reymermet %>% 
+  filter( accuracy == 1) %>% # only correct trials as stroop effect is only on correct drift
+  mutate(cond = ifelse(congruency == 1, "c", "inc")) %>% 
+  group_by(subject, cond) %>% 
+  count()
+
+#save(sln_extract_RMy, trialnr_RMy, file="output/SLN/sln_samples_RMy.RData")
+
+# posterior predictive checks ---------------------------------------------------
+
+
+pdf(file = "output/SLN/plot_cdf_pp_sln_reymermet.pdf", width = 7, height = 3.5)
+par(mfrow=c(1,2))    
+plot_cdf_pp(reymermet, stan_sln_RMy, subject = "none", factors = "CT", 
+          layout = NULL, xlim = c(0,5))
+dev.off()
+
+individual_pp_RMy <- individual_pp_check(reymermet, stan_sln_RMy)
+ggsave("output/SLN/ind_sln_c_RMy.pdf",individual_pp_RMy$congruent, height = 5.8, width = 5.2, dev = cairo_pdf)
+ggsave("output/SLN/ind_sln_ic_RMy.pdf",individual_pp_RMy$incongruent, height = 5.8, width = 5.2, dev = cairo_pdf)
+
+```
+
+
+```{r 'pratte-SLN-fitting'}
+pratte <- read.csv("cleaned_data/pratteetal_2010.csv") %>% 
+  # only correct values
+  filter(accuracy == 1)
+
+trialsum_pratte <- pratte %>% 
+  group_by(subject) %>% 
+  count() %>% 
+  pull(n)
+ 
+I_pratte <- length(unique(pratte$subject))
+ from_pratte <- numeric(I_pratte)
+ for(i in 1:I_pratte){
+  if(i == 1){
+    from_pratte[i] = 1;
+  } else {
+    from_pratte[i] = cumsum(trialsum_pratte)[i-1] + 1;
+  }
+ }
+ 
+ dat_pratte <- pratte %>% 
+   select(rt,accuracy,congruency) %>%
+   mutate(accuracy = ifelse(accuracy == 1, 1, 2),
+          congruency = ifelse(congruency == 1, -0.5, 0.5)) %>% 
+   as.matrix()
+ 
+ subj <- pratte %>% 
+   group_by(subject) %>% 
+   mutate(subj = cur_group_id())
+ 
+start_values <- function(){list(psi_mu = runif(1, 0.1, 0.2),
+                psi_sigma = runif(1, 0.01, 0.05),
+                psi = rep(times = I_pratte, runif(1, 0.1, 0.2),
+                alpha_mu = exp(runif(1, -1,0.5)),
+                alpha_sigma = exp(runif(1, -1, 0.5)),
+                theta_sigma = exp(runif(1, -1, 0.5)),
+                theta_mu = exp(runif(1, -1, 1)),
+                alpha = exp(rep(times = I_pratte, runif(1, -2, 1))),
+                theta = rep(times = I_pratte, runif(1, -1, 1)),
+                sigma = rep(times = I_pratte, runif(1, -0.5, 0)),
+                sigma_sigma = exp(runif(1, -1, 0.5)),
+                sigma_mu = exp(runif(1, -1, 0.5))))} 
+
+ 
+data_P <- list(N = nrow(pratte), I = I_pratte, K = 2, Y = dat_pratte, 
+                J = max(trialsum_pratte), 
+                trialsum = trialsum_pratte, idx_start = from_pratte, subj = subj$subj) 
+ 
+stan_sln_P <- rstan::stan("stan_models/sln.stan", data = data_P, init = start_values, 
+                               iter = 3000, warmup = 2000, chains = 4, 
+                               control = list(adapt_delta = 0.98, stepsize = 0.4))
+
+saveRDS(stan_sln_P, "output/SLN/sln_pratte.RDS")
+
+sln_extract_P <- rstan::extract(stan_sln_P, pars = c("mu_c", "mu_ic", "sigma", "theta_sigma"))
+
+trialnr_P <- pratte %>% 
+  filter( accuracy == 1) %>% # only correct trials as stroop effect is only on correct drift
+  mutate(cond = ifelse(congruency == 1, "c", "inc")) %>% 
+  group_by(subject, cond) %>% 
+  count()
+
+#save(sln_extract_P, trialnr_P, file="output/SLN/sln_samples_P.RData")
+
+# posterior predictive checks ---------------------------------------------------
+
+pdf(file = "output/SLN/plot_cdf_pp_sln_pratte.pdf", width = 7, height = 3.5)
+par(mfrow=c(1,2))    
+plot_cdf_pp(pratte, stan_sln_P, subject = "none", factors = "CT", 
+          layout = NULL, xlim = c(0,5))
+dev.off()
+
+individual_pp_P <- individual_pp_check(pratte, stan_sln_P)
+ggsave("output/SLN/ind_sln_c_P.pdf",individual_pp_P$congruent, height = 5.8, width = 5.2, dev = cairo_pdf)
+ggsave("output/SLN/ind_sln_ic_P.pdf",individual_pp_P$incongruent, height = 5.8, width = 5.2, dev = cairo_pdf)
+
+
+```
+
+```{r 'enkavi-SLN-fitting'}
+enkavi <- read.csv("cleaned_data/enkavietal_2019.csv") %>% 
+  # only correct values
+  filter(accuracy == 1)
+
+trialsum_enkavi <- enkavi %>% 
+  group_by(subject) %>% 
+  count() %>% 
+  pull(n)
+ 
+I_enkavi <- length(unique(enkavi$subject))
+ from_enkavi <- numeric(I_enkavi)
+ for(i in 1:I_enkavi){
+  if(i == 1){
+    from_enkavi[i] = 1;
+  } else {
+    from_enkavi[i] = cumsum(trialsum_enkavi)[i-1] + 1;
+  }
+ }
+ 
+ dat_enkavi <- enkavi %>% 
+   select(rt,accuracy,congruency) %>%
+   mutate(accuracy = ifelse(accuracy == 1, 1, 2),
+          congruency = ifelse(congruency == 1, -0.5, 0.5)) %>% 
+   as.matrix()
+ 
+ subj <- enkavi %>% 
+   group_by(subject) %>% 
+   mutate(subj = cur_group_id())
+ 
+start_values <- function(){list(psi_mu = runif(1, 0.1, 0.2),
+                psi_sigma = runif(1, 0.01, 0.05),
+                psi = rep(times = I_enkavi, runif(1, 0.1, 0.2),
+                alpha_mu = exp(runif(1, -1,0.5)),
+                alpha_sigma = exp(runif(1, -1, 0.5)),
+                theta_sigma = exp(runif(1, -1, 0.5)),
+                theta_mu = exp(runif(1, -1, 1)),
+                alpha = exp(rep(times = I_enkavi, runif(1, -2, 1))),
+                theta = rep(times = I_enkavi, runif(1, -1, 1)),
+                sigma = rep(times = I_enkavi, runif(1, -0.5, 0)),
+                sigma_sigma = exp(runif(1, -1, 0.5)),
+                sigma_mu = exp(runif(1, -1, 0.5))))} 
+
+ 
+data_E <- list(N = nrow(enkavi), I = I_enkavi, K = 2, Y = dat_enkavi, 
+                J = max(trialsum_enkavi), 
+                trialsum = trialsum_enkavi, idx_start = from_enkavi, subj = subj$subj) 
+ 
+stan_sln_E <- rstan::stan("stan_models/sln.stan", data = data_E, init = start_values, 
+                               iter = 4000, warmup = 2000, chains = 4, 
+                               control = list(adapt_delta = 0.98, stepsize = 0.4),
+                          save_warmup = FALSE)
+
+saveRDS(stan_sln_E, "output/SLN/sln_enkavi.RDS")
+
+sln_extract_E <- rstan::extract(stan_sln_E, pars = c("mu_c", "mu_ic", "sigma", "theta_sigma"))
+
+trialnr_E <- enkavi %>% 
+  filter( accuracy == 1) %>% # only correct trials as stroop effect is only on correct drift
+  mutate(cond = ifelse(congruency == 1, "c", "inc")) %>% 
+  group_by(subject, cond) %>% 
+  count()
+
+#save(sln_extract_E, trialnr_E, file="output/SLN/sln_samples_E.RData")
+
+pdf(file = "output/SLN/plot_cdf_pp_sln_enkavi.pdf", width = 7, height = 3.5)
+par(mfrow=c(1,2))    
+plot_cdf_pp(enkavi, stan_sln_E, subject = "none", factors = "CT", 
+          layout = NULL, xlim = c(0,5))
+dev.off()
+
+individual_pp_E <- individual_pp_check(enkavi, stan_sln_E)
+ggsave("output/SLN/ind_sln_c_E.pdf",individual_pp_E$congruent, height = 5.8, width = 5.2, dev = cairo_pdf)
+ggsave("output/SLN/ind_sln_ic_E.pdf",individual_pp_E$incongruent, height = 5.8, width = 5.2, dev = cairo_pdf)
+```
+
+
+```{r 'SLN-SN-ratios-analytical', eval = FALSE}}
+# Von Bastian et al.------------------------------------------------------------
+load("output/SLN/sln_samples_vB.RData") # load previously saved samples
+
+res_sln_vB_a <- sn_sln_analytical(sln_extract_vB)
+
+#saveRDS(res_sln_vB_a, "output/SLN/ratio_sln_vB_a.RDS")
+
+# Pratte et al. ----------------------------------------------------------------
+
+load("output/SLN/sln_samples_P.RData") # load previously saved samples
+
+res_sln_P_a <- sn_sln_analytical(sln_extract_P)
+
+#saveRDS(res_sln_P_a, "output/SLN/ratio_sln_P_a.RDS")
+
+# Rey-Mermet et al. ----------------------------------------------------------------
+
+load("output/SLN/sln_samples_RMy.RData") # load previously saved samples
+
+res_sln_RMy_a <- sn_sln_analytical(sln_extract_RMy)
+
+#saveRDS(res_sln_RMy_a, "output/SLN/ratio_sln_RMy_a.RDS")
+
+# Enkavi et al. ----------------------------------------------------------------
+
+load("output/SLN/sln_samples_E.RData") # load previously saved samples
+
+res_sln_E_a <- sn_sln_analytical(sln_extract_E)
+
+#saveRDS(res_sln_E_a, "output/SLN/ratio_sln_E_a.RDS")
+```
+
+
+
+```{r 'SLN-SN-ratios-sim', eval = FALSE}}
+
+# functions --------------------------------------------------------------------
+
+var_dmu <- function(dtc,dti) {
+  mc <- apply(dtc,2,mean)
+  mi <- apply(dti,2,mean)
+  var(mi-mc)
+}  
+
+getv <- function(s,i,samps,li, lc, r) { # for parallelization
+  var_dmu(dtc=matrix(log(rlnorm(lc[i]*r,samps$mu_c[s, i], samps$sigma[s,i])),nrow=lc[i],ncol=r),
+          dti=matrix(log(rlnorm(li[i]*r,samps$mu_ic[s, i], samps$sigma[s,i])),nrow=li[i],ncol=r))
+}
+
+# Pratte et al. --------------------------------------------------------------
+
+load("sln_samples_P.RData")
+
+I <- ncol(sln_extract_P$mu_c) # nr of participants
+S <- 500# Nr of samples from posterior distributions
+niter <- nrow(sln_extract_P$mu_c)
+idx <- seq(1, niter, by = niter/S)
+r=10000 # nr of replicates 
+
+li <- trialnr_P[trialnr_P$cond=="inc",]$n # individual trial numbers per condition
+lc <- trialnr_P[trialnr_P$cond=="c",]$n
+
+ratio <- numeric(S)
+effect_var_mean <- numeric(S)
+sigma_theta <- numeric(S)
+mean_L <- mean(trialnr_P$n)
+
+
+for(s in 1:S){
+  idx_thin <- idx[s]
+  effect_var <- unlist(mclapply(1:I,getv,s=idx_thin, li=li, lc=lc, r=r,samps=sln_extract_P,mc.cores=16))
+  sigma_theta[s] <- sln_extract_P$theta_sigma[idx_thin]
+  effect_var_mean[s] <- mean(effect_var)
+  ratio[s] <- (sigma_theta[s]^2/((effect_var_mean[s]*mean_L)/2)) # average effect variance and trial number across individuals
+  print(s)
+}
+
+
+hist(sqrt(ratio))
+#save(effect_var_mean, sigma_theta, ratio, file = "output/ratio_and_components_sln_P.RData")
+#saveRDS(ratio, "output/ratio_sln_P.RDS")
+
+# Von Bastian et al. ---------------------------------------------------
+load("sln_samples_vB.RData")
+
+
+I <- ncol(sln_extract_vB$mu_c) # nr of participants
+S <- 500# Nr of samples from posterior distributions
+niter <- nrow(sln_extract_vB$mu_c)
+idx <- seq(1, niter, by = niter/S)
+r=10000 # nr of replicates 
+
+li <- trialnr_vB[trialnr_vB$cond=="inc",]$n # individual trial numbers per condition
+lc <- trialnr_vB[trialnr_vB$cond=="c",]$n
+
+ratio <- numeric(S)
+effect_var_mean <- numeric(S)
+sigma_theta <- numeric(S)
+mean_L <- mean(trialnr_vB$n)
+
+
+for(s in 1:S){
+  idx_thin <- idx[s]
+  effect_var <- unlist(mclapply(1:I,getv,s=idx_thin, li=li, lc=lc, r=r,samps=sln_extract_vB,mc.cores=16))
+  sigma_theta[s] <- sln_extract_vB$theta_sigma[idx_thin]
+  effect_var_mean[s] <- mean(effect_var)
+  ratio[s] <- (sigma_theta[s]^2/((effect_var_mean[s]*mean_L)/2)) # average effect variance and trial number across individuals
+  print(s)
+}
+
+
+hist(sqrt(ratio))
+#save(effect_var_mean, sigma_theta, ratio, file = "output/ratio_and_components_sln_vB.RData")
+#saveRDS(ratio, "output/ratio_sln_vB.RDS")
+
+# Rey-Mermet et al. ---------------------------------------------------
+load("sln_samples_RMy.RData")
+
+
+I <- ncol(sln_extract_RMy$mu_c) # nr of participants
+S <- 500# Nr of samples from posterior distributions
+niter <- nrow(sln_extract_RMy$mu_c)
+idx <- seq(1, niter, by = niter/S)
+r=10000 # nr of replicates 
+
+li <- trialnr_RMy[trialnr_RMy$cond=="inc",]$n # individual trial numbers per condition
+lc <- trialnr_RMy[trialnr_RMy$cond=="c",]$n
+
+ratio <- numeric(S)
+effect_var_mean <- numeric(S)
+sigma_theta <- numeric(S)
+mean_L <- mean(trialnr_RMy$n)
+
+
+for(s in 1:S){
+  idx_thin <- idx[s]
+  effect_var <- unlist(mclapply(1:I,getv,s=idx_thin, li=li, lc=lc, r=r,samps=sln_extract_RMy,mc.cores=16))
+  sigma_theta[s] <- sln_extract_RMy$theta_sigma[idx_thin]
+  effect_var_mean[s] <- mean(effect_var)
+  ratio[s] <- (sigma_theta[s]^2/((effect_var_mean[s]*mean_L)/2)) # average effect variance and trial number across individuals
+  print(s)
+}
+
+hist(sqrt(ratio))
+#save(effect_var_mean, sigma_theta, ratio, file = "output/ratio_and_components_sln_RMy.RData")
+#saveRDS(ratio, "output/ratio_sln_RMy.RDS")
+
+
+# Enkavi et al. ----------------------------------------------------------------
+
+load("sln_samples_E.RData")
+
+
+I <- ncol(sln_extract_E$mu_c) # nr of participants
+S <- 500# Nr of samples from posterior distributions
+niter <- nrow(sln_extract_E$mu_c)
+idx <- seq(1, niter, by = niter/S)
+r=10000 # nr of replicates 
+
+li <- trialnr_E[trialnr_E$cond=="inc",]$n # individual trial numbers per condition
+lc <- trialnr_E[trialnr_E$cond=="c",]$n
+
+ratio <- numeric(S)
+effect_var_mean <- numeric(S)
+sigma_theta <- numeric(S)
+mean_L <- mean(trialnr_E$n)
+
+
+for(s in 1:S){
+  idx_thin <- idx[s]
+  effect_var <- unlist(mclapply(1:I,getv,s=idx_thin, li=li, lc=lc, r=r,samps=sln_extract_E,mc.cores=16))
+  sigma_theta[s] <- sln_extract_E$theta_sigma[idx_thin]
+  effect_var_mean[s] <- mean(effect_var)
+  ratio[s] <- (sigma_theta[s]^2/((effect_var_mean[s]*mean_L)/2)) # average effect variance and trial number across individuals
+  print(s)
+}
+
+hist(sqrt(ratio))
+#save(effect_var_mean, sigma_theta, ratio, file = "output/ratio_and_components_sln_E.RData")
+#saveRDS(ratio, "output/ratio_sln_E.RDS")
+
+```
+
+

@@ -1,0 +1,1351 @@
+```{r}
+library(ggplot2)
+library(patchwork)
+library(extraDistr)
+library(scales)
+library(bayesplot)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggdist)
+```
+
+```{r 'model-overview', fig.cap = "Model overview", fig.height=3, fig.width = 6, cache = TRUE, warning = FALSE}
+custom_theme <- theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line.y = element_blank(),
+    axis.line.x = element_line(),
+    axis.title=element_blank(),
+    axis.ticks= element_blank(),
+    axis.text = element_blank(),
+    panel.border = element_blank(),
+    legend.position = "none"
+  )
+
+# colours
+cols <- scales::viridis_pal(option="plasma", end = 0.8)(5)
+
+# Normal distribution plot
+p_normal <- ggplot(data = data.frame(x = c(-0.2, 2)), aes(x = x)) +
+  stat_function(fun = dnorm, args = list(mean = 0.27, sd = 0.13), color=cols[1]) +
+  labs(subtitle ="Normal Model", x=NULL) +
+  geom_vline(aes(xintercept = 0), colour = "darkgrey") +
+  custom_theme
+
+# Lognormal distribution plot
+custom_dlnorm <- function(x, meanlog = 0, sdlog = 1) {
+  y <- dlnorm(x, meanlog, sdlog)
+  ifelse(x >= 0, y, NA) # Return NA for x values below 0
+}
+p_lognormal <- ggplot(data = data.frame(x = c(0, 2)), aes(x = x)) +
+  stat_function(fun = custom_dlnorm, args = list(meanlog = log(0.2), sdlog = 0.5), color=cols[2]) +
+  labs(subtitle="Lognormal Model", x=NULL) +
+  geom_vline(aes(xintercept=0), colour = "darkgrey") +
+  scale_x_continuous(limits = c(-0.2, 2)) +
+  custom_theme
+
+# Shifted Lognormal distribution plot
+shifted_dlnorm <- function(x, meanlog = 0, sdlog = 1, shift = 0) {
+  y <- dlnorm(x - shift, meanlog, sdlog) # subtract the shift from x before calculating the density
+  ifelse(x >= shift, y, NA)
+  }
+p_shifted_lognormal <- ggplot(data = data.frame(x = c(0, 2)), aes(x = x)) +
+  stat_function(fun = function(x) shifted_dlnorm(x, meanlog = log(0.2), sdlog = 0.5, shift = 0.15), color=cols[3]) +
+  labs(subtitle="Shifted Lognormal Model", x=NULL) +
+  geom_vline(aes(xintercept = 0), colour = "darkgrey") +
+  scale_x_continuous(limits = c(-0.2, 2)) +
+  annotate(
+    x = 0.1, y = -Inf, label = paste0("I"), geom = "text",
+    lineheight = .6,
+    vjust = .8
+  ) +
+    annotate(geom = "text", x = 0.1, y = -Inf, label = expression(psi),
+             lineheight = .6,
+    vjust = 2) +
+  coord_cartesian(clip = "off") +
+  custom_theme +
+  theme(plot.margin = margin(t = 10, r = 10, b = 15, l = 10))
+
+
+# LNR: simulate race to plot finishing time and observed distributions -----
+set.seed(202)
+match_lnr <- rlnorm(1e6, meanlog = log(0.2), sdlog = 0.5)
+mismatch_lnr <- rlnorm(1e6, meanlog = log(0.5), sdlog = 0.8)
+winner_lnr <- rep(NA, length(match))
+for(i in 1:length(match_lnr)){
+  winner_lnr[i] <- which.min(c(match_lnr[i], mismatch_lnr[i]))
+}
+observed_match_lnr <- match_lnr[winner_lnr == 1]
+observed_mismatch_lnr <- mismatch_lnr[winner_lnr == 2]
+
+p_lnr <- ggplot() +
+    geom_line(aes(x=density(match_lnr)$x, y = density(match_lnr)$y), position = position_nudge(x = 0.15), color=cols[4]) +
+  geom_line(aes(x=density(mismatch_lnr)$x, y = density(mismatch_lnr)$y), position = position_nudge(x = 0.3), color=alpha(cols[4], 0.5)) +
+  geom_line(aes(x=density(observed_match_lnr)$x, y = density(observed_match_lnr)$y*mean(winner_lnr == 1)), linetype =
+              "dashed" , position = position_nudge(x = 0.15),
+            colour = alpha("black", 0.9)) +
+  geom_line(aes(x=density(observed_mismatch_lnr)$x, y = density(observed_mismatch_lnr)$y*mean(winner_lnr == 2)), linetype =
+              "dashed", position = position_nudge(x = 0.15), colour = alpha("black", 0.5)) +
+  labs(subtitle="Lognormal Race Model", x=NULL) +
+  geom_vline(aes(xintercept = 0), colour = "darkgrey") +
+  scale_x_continuous(limits = c(-0.2, 2)) +
+  annotate(
+    x = 0.1, y = -Inf, label = paste0("I"), geom = "text",
+    lineheight = .6,
+    vjust = .8
+  ) +
+    annotate(geom = "text", x = 0.1, y = -Inf, label = expression(psi),
+             lineheight = .6,
+    vjust = 2) +
+  coord_cartesian(clip = "off") +
+  custom_theme +
+    theme(plot.margin = margin(t = 10, r = 10, b = 15, l = 10))
+
+
+# RDM plot --------
+set.seed(202)
+# create random walk
+values1 <- 0.001
+current1 <- 0.001
+while(current1 > 0 & current1 < 2) {
+  current1 <- current1 + ifelse(runif(1) < 0.65, 0.16, -0.16)
+  values1 <- c(values1, current1)
+}
+values2 <- 0.001
+current2 <- 0.001
+while(current2 > 0 & current2 < 2) {
+  current2 <- current2 + ifelse(runif(1) < 0.65, 0.16, -0.16)
+  values2 <- c(values2, current2)
+}
+# simulate race to plot finishing time and observed distributions
+match <- rwald(1e6, mu = 1, lambda = 1)
+mismatch <- rwald(1e6, mu = 3, lambda = 2)
+winner <- rep(NA, length(match))
+for(i in 1:length(match)){
+  winner[i] <- which.min(c(match[i], mismatch[i]))
+}
+observed_match <- match[winner == 1]
+observed_mismatch <- mismatch[winner == 2]
+
+p_rdm <- 
+  ggplot() +
+  scale_x_continuous(limits = c(-0.2, 2)) +
+  scale_y_continuous(limits = c(-0.2,4)) +
+  custom_theme +
+  geom_segment(aes(x = 0, y = -Inf, yend=2, xend=0), size = 0.5,
+               colour = "darkgrey") +
+  geom_segment(aes(x = -0.08, y = 2, yend=2, xend=Inf), size = 0.5)+
+  annotate(geom = "text", x = -0.14, y = 2, label = expression(beta)) +
+    annotate(geom = "text", x = 0.1, y = -Inf, label = expression(psi),
+             lineheight = .6,
+    vjust = 2) +
+  annotate(
+    x = 0.1, y = -Inf, label = paste0("I"), geom = "text",
+    lineheight = .6,
+    vjust = .8
+  ) +
+  coord_cartesian(clip = "off") +
+   labs(subtitle="Racing Diffusion Model", x=NULL)+
+      geom_line(aes(x = density(match)$x, y = density(match)$y*1.5), 
+              xlim = c(0,6), position = position_nudge(x = 0.2, y = 2.14), color=cols[5]) +
+      geom_line(aes(x = density(mismatch)$x, y = density(mismatch)$y*1.5), 
+              xlim = c(0,6), position = position_nudge(x = 0.2, y = 2.14), color=alpha(cols[5], 0.5)) +
+      geom_line(aes(x = density(observed_match)$x, y = density(observed_match)$y*mean(winner == 1)*1.5), 
+              xlim = c(0,6), position = position_nudge(x = 0.2, y = 2.14),
+              linetype = "dashed", colour = alpha("black", 0.9)) +
+      geom_line(aes(x = density(observed_mismatch)$x, y = density(observed_mismatch)$y*mean(winner == 2)*1.5), 
+              xlim = c(0,6), position = position_nudge(x = 0.2, y = 2.14), 
+              linetype = "dashed", colour = alpha("black", 0.6)) +
+    geom_path(aes(x = seq(0.105, 0.55, length.out = length(values1)), y = values1), color = cols[5]) +
+  geom_path(aes(x = seq(0.105, 0.8, length.out = length(values2)), y = values2 #+ c(runif(length(values)-1, -0.05,0.05), 0)
+                )
+            , color = alpha(cols[5], 0.5)) +
+    geom_segment(aes(x = 0.1, y = -Inf, yend=values2[1], xend=0.105),color = alpha(cols[5], 0.5)) +
+  geom_segment(aes(x = 0.1, y = -Inf, yend=values1[1], xend=0.105), color = cols[5])+
+  geom_segment(aes(x=0.15, xend = 0.29, y = 0.65, yend = 1.55), arrow = arrow(length = unit(0.06, "npc")), size = 0.2) +
+  geom_segment(aes(x=0.33, xend = 0.63, y = 0.73, yend = 1.63), arrow = arrow(length = unit(0.06, "npc")), size = 0.2) +
+  annotate(geom = "text", x = 0.16, y = 1.25, label = expression(nu[1]), parse = TRUE, size = 2.7) +
+  annotate(geom = "text", x = 0.58, y = 1.1, label = expression(nu[2]), parse = TRUE, size = 2.7) +
+  theme(plot.margin = margin(t = 15, r = 10, b = 15, l = 10))
+
+
+# plot all --------
+ 
+(p_normal / p_lognormal / p_shifted_lognormal) | (p_lnr / p_rdm)
+
+```
+
+```{r 'cdf'}
+plot_cdf_pp_cm <- function(data, modelfit, modelname, reversed = FALSE, npred = 500, subject = NULL, factors = NULL, stat = NULL, 
+                       stat_name = "", adjust = 1, ci = c(0.025, 0.5, 0.975), do_plot = TRUE, 
+                       xlim = NULL, ylim = NULL, layout = NULL, mfcol = TRUE, probs = c(1:99)/100, 
+                       data_lwd = 1, fit_lwd = 2, qp_cex = 1, q_points = c(0.1,0.3, 0.5, 0.7, 0.9), 
+                       pqp_cex = 0.5, lpos = "topleft", 
+                       signalFactor = "S", zROC = FALSE, qfun = qnorm, lim = NULL, 
+                       rocfit_cex = 0.5){
+
+    
+      J <- data %>% group_by(subject) %>% count() %>% pull(n) %>% max()
+  I <- length(unique(data$subject))
+  data <- data %>% 
+  transmute(CT = as.factor(congruency),
+            R = as.factor(ifelse(accuracy == 1, 1, 2)),
+            rt = rt)
+  filler <- -9999
+  idx <- round(seq(from = 1, to = 4000, length.out = npred),0)
+  y_pred <- rstan::extract(modelfit, "Y_pred")$Y_pred[idx,,,]
+  
+  pp_dat2 <- matrix(aperm(y_pred, c(3,2,1,4)), ncol = 3) %>% 
+    as.data.frame() %>% 
+    rename("rt" = V1, "accuracy" = V2, "cond" = V3) %>% 
+    mutate(pp = rep(1:npred, each = I*J),
+           s = rep(rep(1:I, each = J), times = npred)) %>% 
+    filter(rt != filler, accuracy != filler, cond != filler)
+  
+  # postn [1:nsamps] CT [0,1] R [1,2] rt [in sec]
+  
+  if(reversed){ # rdm, as greater drift means faster
+    pp <- pp_dat2 %>% 
+      transmute(postn = pp,
+                CT = as.factor(ifelse(cond == 0.5, 1, 2)),
+                R = as.factor(ifelse(accuracy == 1, 1, 2)),
+                rt = rt)
+  } else {
+    pp <- pp_dat2 %>% 
+      transmute(postn = pp,
+                CT = as.factor(ifelse(cond == 0.5, 2, 1)),
+                R = as.factor(ifelse(accuracy == 1, 1, 2)),
+                rt = rt)
+    
+  }
+
+  if (!is.null(subject)) {
+    snams <- levels(data$subjects)
+    if (is.numeric(subject)){ 
+      subject <- snams[subject]
+      dat <- droplevels(data[data$subjects %in% subject, ])
+      pp <- droplevels(pp[pp$subjects %in% subject, ])
+    }
+    if (subject == "none"){
+      dat <- data
+      fnams <- names(dat)[!(names(dat) %in% c("subjects", "trials", "R", 
+                                              "rt"))]
+    }
+    else if (!all(subject %in% snams)) 
+      stop("Subject(s) not present\n")
+    if (length(subject) > 1)
+      fnams <- names(dat)[!(names(dat) %in% c("trials", 
+                                              "R", "rt"))]
+    else fnams <- names(dat)[!(names(dat) %in% c("subjects", 
+                                                 "trials", "R", "rt"))]
+  } 
+  else {
+    dat <- data
+    fnams <- names(dat)[!(names(dat) %in% c("trials", "R", 
+                                            "rt"))]
+  }
+  if (!is.null(factors)) {
+    if (!all(factors %in% fnams)) 
+      stop("factors must name factors in data")
+    fnams <- factors
+  }
+  if (!is.null(layout)) 
+    if (mfcol) par(mfcol = layout)
+  else par(mfrow = layout)
+  if (all(is.na(data$rt))) {
+    if (length(levels(data$R)) == 2 & is.null(stat)) 
+      stop("No plots for binary responses, use an accuracy function in stat argument.")
+    if (!is.null(stat)) {
+      cells <- dat[, fnams, drop = FALSE]
+      for (i in fnams) cells[, i] <- paste(i, cells[, i], 
+                                           sep = "=")
+      cells <- apply(cells, 1, paste, collapse = " ")
+      pp_cells <- pp[, fnams, drop = FALSE]
+      for (i in fnams) pp_cells[, i] <- paste(i, pp_cells[, 
+                                                          i], sep = "=")
+      pp_cells <- apply(pp_cells, 1, paste, collapse = " ")
+      postn <- unique(pp$postn)
+      ucells <- sort(unique(cells))
+      tab <- matrix(nrow = length(ucells), ncol = 4, dimnames = list(ucells, 
+                                                                     c("Observed", names(quantile(1:5, ci)))))
+      for (i in ucells) {
+        obs <- stat(dat[cells == i, ])
+        ppi <- pp[pp_cells == i, ]
+        pred <- sapply(postn, function(x) {
+          stat(ppi[ppi$postn == x, ])
+        })
+        if (do_plot) {
+          dens <- density(pred, adjust = adjust)
+          if (!is.null(xlim)) 
+            xlimi <- xlim
+          else xlimi <- c(pmin(obs, min(dens$x)), pmax(obs, 
+                                                       max(dens$x)))
+          plot(dens, main = i, xlab = stat_name, xlim = xlimi)
+          abline(v = obs)
+        }
+        tab[i, ] <- c(obs, quantile(pred, ci))
+      }
+      invisible(tab)
+    }
+    else {
+      if (!any(fnams == signalFactor)) 
+        stop("Data does not have a column specified in the signalFactor argument: ", 
+             signalFactor)
+      if (length(levels(data[[signalFactor]])) != 2) 
+        stop("signalFactor must have exactly two levels for an ROC plot")
+      if (zROC & is.null(qfun)) 
+        stop("Must supply qfun for zROC")
+      fnams <- fnams[fnams != signalFactor]
+      cells <- dat[, fnams, drop = FALSE]
+      for (i in fnams) cells[, i] <- paste(i, cells[, i], 
+                                           sep = "=")
+      cells <- apply(cells, 1, paste, collapse = " ")
+      pp_cells <- pp[, fnams, drop = FALSE]
+      for (i in fnams) pp_cells[, i] <- paste(i, pp_cells[, 
+                                                          i], sep = "=")
+      pp_cells <- apply(pp_cells, 1, paste, collapse = " ")
+      postn <- unique(pp$postn)
+      ucells <- sort(unique(cells))
+      for (i in ucells) {
+        dpts <- plot_roc(dat[cells == i, ], zROC = zROC, 
+                         qfun = qfun, lim = lim, main = i, signalFactor = signalFactor)
+        tab <- table(pp[pp_cells == i, ]$postn, pp[pp_cells == 
+                                                     i, ]$R, pp[pp_cells == i, ][[signalFactor]])
+        ctab <- apply(tab, 1, function(x) {
+          list(1 - apply(t(x)/apply(x, 2, sum), 1, cumsum)[-dim(x)[1], 
+          ])
+        })
+        if (!zROC) 
+          lapply(ctab, function(x) {
+            points(x[[1]][, 1], x[[1]][, 2], col = "grey", 
+                   pch = 16, cex = rocfit_cex)
+          })
+        else ctab <- lapply(ctab, function(x) {
+          x[[1]] <- qnorm(x[[1]])
+          points(x[[1]][row.names(dpts), 1], x[[1]][row.names(dpts), 
+                                                    2], col = "grey", pch = 16, cex = rocfit_cex)
+        })
+        points(dpts[, 1], dpts[, 2])
+        lines(dpts[, 1], dpts[, 2])
+      }
+    }
+  }
+  else {
+    cells <- dat[, fnams, drop = FALSE]
+    for (i in fnams) cells[, i] <- paste(i, cells[, i], sep = "=")
+    cells <- apply(cells, 1, paste, collapse = " ")
+    pp_cells <- pp[, fnams, drop = FALSE]
+    for (i in fnams) pp_cells[, i] <- paste(i, pp_cells[, 
+                                                        i], sep = "=")
+    pp_cells <- apply(pp_cells, 1, paste, collapse = " ")
+    if (!is.null(stat)) {
+      postn <- unique(pp$postn)
+      ucells <- sort(unique(cells))
+      tab <- matrix(nrow = length(ucells), ncol = 4, dimnames = list(ucells, 
+                                                                     c("Observed", names(quantile(1:5, ci)))))
+      for (i in ucells) {
+        obs <- stat(dat[cells == i, ])
+        ppi <- pp[pp_cells == i, ]
+        pred <- sapply(postn, function(x) {
+          stat(ppi[ppi$postn == x, ])
+        })
+        if (do_plot) {
+          dens <- density(pred, adjust = adjust)
+          if (!is.null(xlim)) 
+            xlimi <- xlim
+          else xlimi <- c(pmin(obs, min(dens$x)), pmax(obs, 
+                                                       max(dens$x)))
+          plot(dens, main = i, xlab = stat_name, xlim = xlimi)
+          abline(v = obs)
+        }
+        tab[i, ] <- c(obs, quantile(pred, ci))
+      }
+      invisible(tab)
+    }
+    else {
+      pok <- probs %in% q_points
+      R <- levels(dat$R)
+      if (is.null(ylim)) 
+        ylim <- c(0, 1)
+      if (is.null(xlim)) {
+        xlim <- c(Inf, -Inf)
+        for (i in sort(unique(cells))) {
+          dati <- dat[cells == i, ]
+          ppi <- pp[pp_cells == i, ]
+          pR <- table(dati$R)/dim(dati)[1]
+          pqs <- pq <- qs <- setNames(vector(mode = "list", 
+                                             length = length(R)), R)
+          for (j in R) if (length(dati$rt[dati$R == j]) >= 
+                           length(q_points)) {
+            qs[[j]] <- quantile(dati$rt[dati$R == j], 
+                                probs = probs)
+            pq[[j]] <- quantile(ppi$rt[ppi$R == j], probs = probs)
+            pqs[[j]] <- tapply(ppi$rt[ppi$R == j], ppi$postn[ppi$R == 
+                                                               j], quantile, probs = probs[pok])
+          }
+          else qs[[j]] <- pq[[j]] <- pqs[[j]] <- NA
+          rx <- cbind(do.call(rbind, lapply(qs, function(x) {
+            x[c(1, length(probs))]
+          })), do.call(rbind, lapply(pq, function(x) {
+            x[c(1, length(probs))]
+          })))
+          xlimi <- c(min(rx, na.rm = TRUE), max(rx, na.rm = TRUE))
+          if (!any(is.na(xlimi))) {
+            xlim[1] <- pmin(xlim[1], xlimi[1])
+            xlim[2] <- pmax(xlim[2], xlimi[2])
+          }
+        }
+      }
+      for (i in sort(unique(cells))) {
+        title <- ifelse(i==sort(unique(cells))[1], paste0(modelname, ": Congruent"),
+                        paste0(modelname, ": Incongruent"))
+        dati <- dat[cells == i, ]
+        ppi <- pp[pp_cells == i, ]
+        pR <- table(dati$R)/dim(dati)[1]
+        pqs <- pq <- qs <- setNames(vector(mode = "list", 
+                                           length = length(R)), R)
+        ppR <- pR
+        ppR[1:length(pR)] <- 0
+        for (j in R) if (length(dati$rt[dati$R == j]) >= 
+                         length(q_points)) {
+          isj <- ppi$R == j
+          qs[[j]] <- quantile(dati$rt[dati$R == j], probs = probs)
+          pq[[j]] <- quantile(ppi$rt[isj], probs = probs)
+          pqs[[j]] <- tapply(ppi$rt[isj], ppi$postn[isj], 
+                             quantile, probs = probs[pok])
+          ppR[j] <- mean(isj)
+        }
+        else qs[[j]] <- pq[[j]] <- pqs[[j]] <- NA
+        if (!any(is.na(pq[[1]]))) {
+          par(mar=c(3,4,2,0) + 0.1)
+          plot(pq[[1]], probs * ppR[1], xlim = xlim, 
+               ylim = ylim, main = title, xlab = "", type = "l", col = "#3182bd",
+               lwd = fit_lwd, ylab = "", lty = 1, axes=FALSE)
+          axis(1, padj = -0.8)
+          axis(2, las=1, hadj = 0.8)
+          title(xlab = "RT", line=1.5)
+          title(line=2.5, ylab = "Cumulative probability")
+          tmp = lapply(pqs[[1]], function(x) {
+            points(x, probs[pok] * ppR[1], col = "#3182bd", 
+                   pch = 16, cex = pqp_cex)
+          })
+          points(pq[[1]][pok], probs[pok] * ppR[1], cex = pqp_cex * 
+                   3, pch = 16, col = "#3182bd")
+          lines(qs[[1]], probs * pR[1], lwd = data_lwd, 
+                lty = 1, col = "#c51b8a")
+          points(qs[[1]][pok], probs[pok] * pR[1], cex = qp_cex, 
+                 pch = 16, col = "#c51b8a")
+          do_plot = FALSE
+        }
+        else do_plot = TRUE
+        if (length(qs) > 1) {
+          for (j in 2:length(qs)) if (!any(is.na(pq[[j]]))) {
+            if (do_plot) {
+              plot(pq[[j]], probs * ppR[j], xlim = xlim, 
+                   ylim = ylim, main = title, xlab = "RT", type = "l", 
+                   lwd = fit_lwd, ylab = "Cumulative probability", lty = j,
+                   col = "#c51b8a")
+              do_plot <- FALSE
+            }
+            else lines(pq[[j]], probs * ppR[j], lwd = fit_lwd, 
+                       lty = j, col= "#3182bd")
+            tmp = lapply(pqs[[j]], function(x) {
+              points(x, probs[pok] * ppR[j], col = "#3182bd", 
+                     pch = 16, cex = pqp_cex)
+            })
+            points(pq[[j]][pok], probs[pok] * ppR[j], 
+                   cex = pqp_cex * 3, pch = 16, col = "#3182bd")
+            lines(qs[[j]], probs * pR[j], lwd = data_lwd, 
+                  lty = j, col = "#c51b8a")
+            points(qs[[j]][pok], probs[pok] * pR[j], 
+                   cex = qp_cex, pch = 16, col = "#c51b8a")
+          }
+        }
+      }
+    }
+  }
+}
+
+plot_cdf_pp <- function(data, modelfit, modelname, npred = 500, subject = NULL, factors = NULL, stat = NULL, 
+                       stat_name = "", adjust = 1, ci = c(0.025, 0.5, 0.975), do_plot = TRUE, 
+                       xlim = NULL, ylim = NULL, layout = NULL, mfcol = TRUE, probs = c(1:99)/100, 
+                       data_lwd = 1, fit_lwd = 2, qp_cex = 1, q_points = c(0.1,0.3, 0.5, 0.7, 0.9), 
+                       pqp_cex = 0.5, lpos = "topleft", 
+                       signalFactor = "S", zROC = FALSE, qfun = qnorm, lim = NULL, 
+                       rocfit_cex = 0.5){
+  raw <- data
+  J <- data %>% group_by(subject) %>% count() %>% pull(n) %>% max()
+  I <- length(unique(data$subject))
+  data <- data %>% 
+  transmute(CT = as.factor(congruency),
+            rt = rt,
+            s = as.factor(data$subject),
+            R = as.factor(1)) %>% 
+    as.data.frame()
+  idx <- round(seq(from = 1, to = 4000, length.out = npred),0)
+  y_pred <- rstan::extract(modelfit, "y_pred")$y_pred[idx,]
+  
+  pp_dat2 <- y_pred %>% 
+    as.data.frame() %>% 
+    tidyr::pivot_longer(names_to = "obs", values_to = "rt", cols = everything()) %>% 
+    mutate(pp = rep(1:npred, each = nrow(data)),
+           s = rep(raw$subject, times = npred),
+           cond= rep(data$CT, times = npred)) %>% 
+    as.data.frame()
+ 
+# postn [1:nsamps] CT [0,1] R [1,2] rt [in sec]
+  pp <- pp_dat2 %>% 
+    transmute(postn = pp,
+              CT = as.factor(cond),
+              R = as.factor(1),
+              rt = rt) %>% 
+    as.data.frame()
+
+  if (!is.null(subject)) {
+    snams <- levels(data$subjects)
+    if (is.numeric(subject)){ 
+      subject <- snams[subject]
+      dat <- droplevels(data[data$subjects %in% subject, ])
+      pp <- droplevels(pp[pp$subjects %in% subject, ])
+    }
+    if (subject == "none"){
+      dat <- data
+      fnams <- names(dat)[!(names(dat) %in% c("subjects", "trials", "R", 
+                                              "rt"))]
+    }
+    else if (!all(subject %in% snams)) 
+      stop("Subject(s) not present\n")
+    if (length(subject) > 1)
+      fnams <- names(dat)[!(names(dat) %in% c("trials", 
+                                              "R", "rt"))]
+    else fnams <- names(dat)[!(names(dat) %in% c("subjects", 
+                                                 "trials", "R", "rt"))]
+  } 
+  else {
+    dat <- data
+    fnams <- names(dat)[!(names(dat) %in% c("trials", "R", 
+                                            "rt"))]
+  }
+  if (!is.null(factors)) {
+    if (!all(factors %in% fnams)) 
+      stop("factors must name factors in data")
+    fnams <- factors
+  }
+  if (!is.null(layout)) 
+    if (mfcol) par(mfcol = layout)
+  else par(mfrow = layout)
+  if (all(is.na(data$rt))) {
+    if (length(levels(data$R)) == 2 & is.null(stat)) 
+      stop("No plots for binary responses, use an accuracy function in stat argument.")
+    if (!is.null(stat)) {
+      cells <- dat[, fnams, drop = FALSE]
+      for (i in fnams) cells[, i] <- paste(i, cells[, i], 
+                                           sep = "=")
+      cells <- apply(cells, 1, paste, collapse = " ")
+      pp_cells <- pp[, fnams, drop = FALSE]
+      for (i in fnams) pp_cells[, i] <- paste(i, pp_cells[, 
+                                                          i], sep = "=")
+      pp_cells <- apply(pp_cells, 1, paste, collapse = " ")
+      postn <- unique(pp$postn)
+      ucells <- sort(unique(cells))
+      tab <- matrix(nrow = length(ucells), ncol = 4, dimnames = list(ucells, 
+                                                                     c("Observed", names(quantile(1:5, ci)))))
+      for (i in ucells) {
+        obs <- stat(dat[cells == i, ])
+        ppi <- pp[pp_cells == i, ]
+        pred <- sapply(postn, function(x) {
+          stat(ppi[ppi$postn == x, ])
+        })
+        if (do_plot) {
+          dens <- density(pred, adjust = adjust)
+          if (!is.null(xlim)) 
+            xlimi <- xlim
+          else xlimi <- c(pmin(obs, min(dens$x)), pmax(obs, 
+                                                       max(dens$x)))
+          plot(dens, main = i, xlab = stat_name, xlim = xlimi)
+          abline(v = obs)
+        }
+        tab[i, ] <- c(obs, quantile(pred, ci))
+      }
+      invisible(tab)
+    }
+    else {
+      if (!any(fnams == signalFactor)) 
+        stop("Data does not have a column specified in the signalFactor argument: ", 
+             signalFactor)
+      if (length(levels(data[[signalFactor]])) != 2) 
+        stop("signalFactor must have exactly two levels for an ROC plot")
+      if (zROC & is.null(qfun)) 
+        stop("Must supply qfun for zROC")
+      fnams <- fnams[fnams != signalFactor]
+      cells <- dat[, fnams, drop = FALSE]
+      for (i in fnams) cells[, i] <- paste(i, cells[, i], 
+                                           sep = "=")
+      cells <- apply(cells, 1, paste, collapse = " ")
+      pp_cells <- pp[, fnams, drop = FALSE]
+      for (i in fnams) pp_cells[, i] <- paste(i, pp_cells[, 
+                                                          i], sep = "=")
+      pp_cells <- apply(pp_cells, 1, paste, collapse = " ")
+      postn <- unique(pp$postn)
+      ucells <- sort(unique(cells))
+      for (i in ucells) {
+        dpts <- plot_roc(dat[cells == i, ], zROC = zROC, 
+                         qfun = qfun, lim = lim, main = i, signalFactor = signalFactor)
+        tab <- table(pp[pp_cells == i, ]$postn, pp[pp_cells == 
+                                                     i, ]$R, pp[pp_cells == i, ][[signalFactor]])
+        ctab <- apply(tab, 1, function(x) {
+          list(1 - apply(t(x)/apply(x, 2, sum), 1, cumsum)[-dim(x)[1], 
+          ])
+        })
+        if (!zROC) 
+          lapply(ctab, function(x) {
+            points(x[[1]][, 1], x[[1]][, 2], col = "grey", 
+                   pch = 16, cex = rocfit_cex)
+          })
+        else ctab <- lapply(ctab, function(x) {
+          x[[1]] <- qnorm(x[[1]])
+          points(x[[1]][row.names(dpts), 1], x[[1]][row.names(dpts), 
+                                                    2], col = "grey", pch = 16, cex = rocfit_cex)
+        })
+        points(dpts[, 1], dpts[, 2])
+        lines(dpts[, 1], dpts[, 2])
+      }
+    }
+  }
+  else {
+    cells <- dat[, fnams, drop = FALSE]
+    for (i in fnams) cells[, i] <- paste(i, cells[, i], sep = "=")
+    cells <- apply(cells, 1, paste, collapse = " ")
+    pp_cells <- pp[, fnams, drop = FALSE]
+    for (i in fnams) pp_cells[, i] <- paste(i, pp_cells[, 
+                                                        i], sep = "=")
+    pp_cells <- apply(pp_cells, 1, paste, collapse = " ")
+    if (!is.null(stat)) {
+      postn <- unique(pp$postn)
+      ucells <- sort(unique(cells))
+      tab <- matrix(nrow = length(ucells), ncol = 4, dimnames = list(ucells, 
+                                                                     c("Observed", names(quantile(1:5, ci)))))
+      for (i in ucells) {
+        obs <- stat(dat[cells == i, ])
+        ppi <- pp[pp_cells == i, ]
+        pred <- sapply(postn, function(x) {
+          stat(ppi[ppi$postn == x, ])
+        })
+        if (do_plot) {
+          dens <- density(pred, adjust = adjust)
+          if (!is.null(xlim)) 
+            xlimi <- xlim
+          else xlimi <- c(pmin(obs, min(dens$x)), pmax(obs, 
+                                                       max(dens$x)))
+          plot(dens, main = i, xlab = stat_name, xlim = xlimi)
+          abline(v = obs)
+        }
+        tab[i, ] <- c(obs, quantile(pred, ci))
+      }
+      invisible(tab)
+    }
+    else {
+      pok <- probs %in% q_points
+      R <- levels(dat$R)
+      if (is.null(ylim)) 
+        ylim <- c(0, 1)
+      if (is.null(xlim)) {
+        xlim <- c(Inf, -Inf)
+        for (i in sort(unique(cells))) {
+          dati <- dat[cells == i, ]
+          ppi <- pp[pp_cells == i, ]
+          pR <- table(dati$R)/dim(dati)[1]
+          pqs <- pq <- qs <- setNames(vector(mode = "list", 
+                                             length = length(R)), R)
+          for (j in R) if (length(dati$rt[dati$R == j]) >= 
+                           length(q_points)) {
+            qs[[j]] <- quantile(dati$rt[dati$R == j], 
+                                probs = probs)
+            pq[[j]] <- quantile(ppi$rt[ppi$R == j], probs = probs)
+            pqs[[j]] <- tapply(ppi$rt[ppi$R == j], ppi$postn[ppi$R == 
+                                                               j], quantile, probs = probs[pok])
+          }
+          else qs[[j]] <- pq[[j]] <- pqs[[j]] <- NA
+          rx <- cbind(do.call(rbind, lapply(qs, function(x) {
+            x[c(1, length(probs))]
+          })), do.call(rbind, lapply(pq, function(x) {
+            x[c(1, length(probs))]
+          })))
+          xlimi <- c(min(rx, na.rm = TRUE), max(rx, na.rm = TRUE))
+          if (!any(is.na(xlimi))) {
+            xlim[1] <- pmin(xlim[1], xlimi[1])
+            xlim[2] <- pmax(xlim[2], xlimi[2])
+          }
+        }
+      }
+      for (i in sort(unique(cells))) {
+        title <- ifelse(i==sort(unique(cells))[1], paste0(modelname, ": Congruent"),
+                        paste0(modelname, ": Incongruent"))
+        dati <- dat[cells == i, ]
+        ppi <- pp[pp_cells == i, ]
+        pR <- table(dati$R)/dim(dati)[1]
+        pqs <- pq <- qs <- setNames(vector(mode = "list", 
+                                           length = length(R)), R)
+        ppR <- pR
+        ppR[1:length(pR)] <- 0
+        for (j in R) if (length(dati$rt[dati$R == j]) >= 
+                         length(q_points)) {
+          isj <- ppi$R == j
+          qs[[j]] <- quantile(dati$rt[dati$R == j], probs = probs)
+          pq[[j]] <- quantile(ppi$rt[isj], probs = probs)
+          pqs[[j]] <- tapply(ppi$rt[isj], ppi$postn[isj], 
+                             quantile, probs = probs[pok])
+          ppR[j] <- mean(isj)
+        }
+        else qs[[j]] <- pq[[j]] <- pqs[[j]] <- NA
+        if (!any(is.na(pq[[1]]))) {
+          par(mar=c(3,4,2,0) + 0.1)
+          plot(pq[[1]], probs * ppR[1], xlim = xlim, 
+               ylim = ylim, main = title, xlab = "", type = "l", col = "#3182bd",
+               lwd = fit_lwd, ylab = "", lty = 1, axes=FALSE)
+          axis(1, padj = -0.8)
+          axis(2, las=1, hadj = 0.8)
+          title(xlab = "RT", line=1.5)
+          title(line=2.5, ylab = "Cumulative probability")
+          tmp = lapply(pqs[[1]], function(x) {
+            points(x, probs[pok] * ppR[1], col = "#3182bd", 
+                   pch = 16, cex = pqp_cex)
+          })
+          points(pq[[1]][pok], probs[pok] * ppR[1], cex = pqp_cex * 
+                   3, pch = 16, col = "#3182bd")
+          lines(qs[[1]], probs * pR[1], lwd = data_lwd, 
+                lty = 1, col = "#c51b8a")
+          points(qs[[1]][pok], probs[pok] * pR[1], cex = qp_cex, 
+                 pch = 16, col = "#c51b8a")
+          do_plot = FALSE
+        }
+        else do_plot = TRUE
+        if (length(qs) > 1) {
+          for (j in 2:length(qs)) if (!any(is.na(pq[[j]]))) {
+            if (do_plot) {
+              plot(pq[[j]], probs * ppR[j], xlim = xlim, 
+                   ylim = ylim, main = title, xlab = "RT", type = "l", 
+                   lwd = fit_lwd, ylab = "Cumulative probability", lty = j,
+                   col = "#c51b8a")
+              do_plot <- FALSE
+            }
+            else lines(pq[[j]], probs * ppR[j], lwd = fit_lwd, 
+                       lty = j, col= "#3182bd")
+            tmp = lapply(pqs[[j]], function(x) {
+              points(x, probs[pok] * ppR[j], col = "#3182bd", 
+                     pch = 16, cex = pqp_cex)
+            })
+            points(pq[[j]][pok], probs[pok] * ppR[j], 
+                   cex = pqp_cex * 3, pch = 16, col = "#3182bd")
+            lines(qs[[j]], probs * pR[j], lwd = data_lwd, 
+                  lty = j, col = "#c51b8a")
+            points(qs[[j]][pok], probs[pok] * pR[j], 
+                   cex = qp_cex, pch = 16, col = "#c51b8a")
+          }
+        }
+      }
+    }
+  }
+}
+
+vonbastian <- read.csv("cleaned_data/vonbastianetal_2016.csv")
+pratte <- read.csv("cleaned_data/pratteetal_2010.csv")
+reymermet <- read.csv("cleaned_data/reymermetetal_2018.csv")
+enkavi <- read.csv("cleaned_data/enkavietal_2019.csv")
+dataset_name <- c("vonbastian", "pratte", "reymermet", "enkavi")
+idx <- 0
+
+
+for(dat in list(vonbastian, pratte, reymermet, enkavi)){
+  idx <- idx + 1
+  pdf(file = paste0("cdf_plots_", dataset_name[idx],".pdf"))
+  par(mfrow = c(5,2))
+  
+  rdm <- readRDS(paste0("output/RDM/rdm_", dataset_name[idx],".RDS"))
+  plot_cdf_pp_cm(data = dat, modelname = "RDM", modelfit = rdm, reversed = TRUE) 
+  rm(rdm)
+  
+  lnr <- readRDS(paste0("output/LNR/lnr_", dataset_name[idx],".RDS"))
+  plot_cdf_pp_cm(data=dat, modelname = "LNR", modelfit = lnr) 
+  rm(lnr)
+  
+  sln <- readRDS(paste0("output/SLN/sln_", dataset_name[idx],".RDS"))
+  plot_cdf_pp(data=dat %>% filter(accuracy == 1), modelname = "SLN", modelfit=sln, subject = "none", factors = "CT", 
+              layout = NULL) 
+  rm(sln)
+  
+  ln <- readRDS(paste0("output/LN/ln_", dataset_name[idx],".RDS"))
+  plot_cdf_pp(data=dat %>% filter(accuracy == 1), modelfit=ln, modelname = "LN", subject = "none", factors = "CT", 
+              layout = NULL) 
+  rm(ln)
+  
+  n <- readRDS(paste0("output/N/n_", dataset_name[idx],".RDS"))
+  plot_cdf_pp(dat %>% filter(accuracy == 1), modelfit=n, modelname = "N", subject = "none", factors = "CT", 
+              layout = NULL) 
+  rm(n)
+  dev.off()
+}
+
+```
+
+
+```{r 'sn-ratios-plot', fig.cap = "Posterior medians and 95\\% credible interval of the signal-to-noise ratios."}
+# ggplot theme, adapted from Andrew Heiss: https://datavizs21.classes.andrewheiss.com/example/05-example/
+mytheme <- function(base_family = "Arial", base_size = 15){
+  
+  theme_minimal(base_family = base_family, base_size = base_size) +
+    theme(panel.grid.minor.y = element_blank(),
+          panel.grid.major.y = element_blank(),
+          # Bold, bigger title
+          plot.title = element_text(size = rel(1)),
+          # Plain, slightly bigger subtitle that is grey
+          plot.subtitle = element_text(face = "plain", size = rel(1.1), color = "grey70"),
+          # Italic, smaller, grey caption that is left-aligned
+          plot.caption = element_text(face = "italic", size = rel(0.7), 
+                                      color = "grey70", hjust = 0),
+          # Bold, slightly larger facet titles that are left-aligned for the sake of repetition
+          strip.text = element_text(face = "bold", size = rel(1.1), hjust = 0),
+          # add grey x axis line
+          axis.line.x = element_line(color = "grey90"),
+          # Add some space above the x-axis title and make it left-aligned
+          axis.title.x = element_text(margin = margin(t = 10)),
+          # Add some space to the right of the y-axis title and make it top-aligned
+          axis.title.y = element_text(margin = margin(r = 10)),
+          # Add a light grey background to the facet titles, with no borders
+          strip.background = element_rect(fill = "grey90", color = NA),
+          # Add a thin grey border around all the plots to tie in the facet titles
+          #panel.border = element_rect(color = "grey90", fill = NA)
+    )
+  
+}
+
+# load samples and create datasets
+ratios_vB <- ratios_P <- ratios_RMy <- ratios_E <- 
+  signal_vB <- signal_P <- signal_RMy <- signal_E <-
+  sigma_vB <- sigma_P <- sigma_RMy <-
+  sigma_E <- data.frame(n = rep(NA, 4000),
+                                                    ln = rep(NA, 4000),
+                                                    sln = rep(NA, 4000),
+                                                    lnr = rep(NA, 4000),
+                                                    rdm = rep(NA, 4000))
+for(model in colnames(ratios_vB)){
+  res <- readRDS(paste0("output/", str_to_upper(model), "/ratio_", model, "_vB_a.RDS"))
+  idx <- round(seq(from = 1, to = length(res$ratio_a), length.out = 4000),0)
+  ratios_vB[,model] <- res$ratio_a[idx]
+  signal_vB[,model] <- res$sigma_theta[idx]
+  sigma_vB[,model] <- res$sigma[idx]
+  
+  res <- readRDS(paste0("output/", str_to_upper(model), "/ratio_", model, "_P_a.RDS"))
+  idx <- round(seq(from = 1, to = length(res$ratio_a), length.out = 4000),0)
+  ratios_P[,model] <- res$ratio_a[idx]
+  signal_P[,model] <- res$sigma_theta[idx]
+  sigma_P[,model] <- res$sigma[idx]
+  
+  res <- readRDS(paste0("output/", str_to_upper(model), "/ratio_", model, "_RMy_a.RDS"))
+  idx <- round(seq(from = 1, to = length(res$ratio_a), length.out = 4000),0)
+  ratios_RMy[,model] <- res$ratio_a[idx]
+  signal_RMy[,model] <- res$sigma_theta[idx]
+  sigma_RMy[,model] <- res$sigma[idx]
+  
+  res <- readRDS(paste0("output/", str_to_upper(model), "/ratio_", model, "_E_a.RDS"))
+  idx <- round(seq(from = 1, to = length(res$ratio_a), length.out = 4000),0)
+  ratios_E[,model] <- res$ratio_a[idx]
+  signal_E[,model] <- res$sigma_theta[idx]
+  sigma_E[,model] <- res$sigma[idx]
+}
+
+sn_ratios <- (ratios_RMy) %>%
+  as.data.frame() %>% 
+  pivot_longer(names_to = "Model", values_to = "samples", cols = everything()) %>% 
+  arrange(Model) %>% 
+  group_by(Model) %>% 
+  summarize(signa = median(samples),
+            signa.lower = quantile(samples, 0.025),
+            signa.upper = quantile(samples, 0.975)) %>% 
+  ungroup() %>% 
+  mutate(dataset = "Rey-Mermet et al., 2018") %>% 
+  # add von Bastian data
+  bind_rows(
+    (ratios_vB) %>%
+      as.data.frame() %>% 
+      pivot_longer(names_to = "Model", values_to = "samples", cols = everything()) %>% 
+      arrange(Model) %>% 
+      group_by(Model) %>% 
+      summarize(signa = median(samples),
+                signa.lower = quantile(samples, 0.025),
+                signa.upper = quantile(samples, 0.975)) %>% 
+      ungroup() %>% 
+      mutate(dataset = "Von Bastian et al., 2016")
+  ) %>% 
+  # add Enkavi data
+  bind_rows(
+    (ratios_E) %>%
+      as.data.frame() %>% 
+      pivot_longer(names_to = "Model", values_to = "samples", cols = everything()) %>% 
+      arrange(Model) %>% 
+      group_by(Model) %>% 
+      summarize(signa = median(samples),
+                signa.lower = quantile(samples, 0.025),
+                signa.upper = quantile(samples, 0.975)) %>% 
+      ungroup() %>% 
+      mutate(dataset = "Enkavi et al., 2019")
+  ) %>% 
+  # add Pratte data
+  bind_rows(
+    (ratios_P) %>%
+      as.data.frame() %>% 
+      pivot_longer(names_to = "Model", values_to = "samples", cols = everything()) %>% 
+      arrange(Model) %>% 
+      group_by(Model) %>% 
+      summarize(signa = median(samples),
+                signa.lower = quantile(samples, 0.025),
+                signa.upper = quantile(samples, 0.975)) %>% 
+      ungroup() %>% 
+      mutate(dataset = "Pratte et al., 2010")) %>% 
+  mutate(Model = case_when(Model == "ln"~ "Lognormal",
+                           Model == "sln"~ "Shifted-lognormal",
+                           Model == "lnr" ~ "LNR",
+                           Model == "rdm" ~ "RDM",
+                           Model == "n" ~ "Normal"),
+         
+         idx = case_when(Model == "Lognormal" ~ 4,
+                         Model == "Shifted-lognormal" ~ 3,
+                         Model == "LNR" ~ 2,
+                         Model == "RDM" ~ 1,
+                         Model == "Normal" ~ 5)) %>% 
+  arrange(dataset, idx)
+
+sn_plot_by_data <- sn_ratios %>% 
+  ggplot(aes(y = dataset, x = signa, xmin = signa.lower, 
+             xmax = signa.upper, color = as.character(idx))) +
+  geom_pointinterval(position = position_dodge(width = .5)) +
+  scale_color_viridis_d(option = "plasma", end = 0.8, limits = rev, labels = c("Normal", "Lognormal", "Shifted-lognormal", "Lognormal race", "Racing diffusion")) +
+  scale_y_discrete(limits = rev) +
+  ggtitle("") +
+  labs(x = "Signal-to-noise ratio" ~ gamma, y = "", color = "") +
+  geom_vline(xintercept = 0, col = "grey70") +
+  #scale_x_continuous(limits = c(0, 0.38)) +
+  mytheme(base_size = 12) 
+
+sn_plot_by_models <- sn_ratios %>%
+  mutate(idx = as.character(case_when(Model == "Lognormal" ~ 4,
+                         Model == "Shifted-lognormal" ~ 3,
+                         Model == "LNR" ~ 2,
+                         Model == "RDM" ~ 1,
+                         Model == "Normal" ~ 5))) %>% 
+  ggplot(aes(y = as.character(idx), x = signa, xmin = signa.lower, 
+             xmax = signa.upper, color = dataset)) +
+  geom_pointinterval(position = position_dodge(width = .5)) +
+  scale_color_viridis_d(option = "C", end = 0.8) +
+  scale_y_discrete(labels = c("Racing diffusion", "Lognormal race", "Shifted-lognormal","Lognormal", "Normal")) +
+  ggtitle("") +
+  labs(x = "Signal-to-noise ratio", y = "", color = "") +
+  geom_vline(xintercept = 0, col = "grey70") +
+  #scale_x_continuous(limits = c(0, 0.38)) +
+  mytheme(base_size = 12)
+
+```
+
+```{r 'signal-component', cache = TRUE, message = FALSE, warning = FALSE}
+plot_samples <- function(model, title, samples_vB, samples_P, samples_RMy, samples_E,y_labels = FALSE){
+   manual_colors <- c("goldenrod1", "mediumpurple3", "deepskyblue4", "firebrick3")   
+  
+  samples <- samples_vB %>% 
+    select({{model}}) %>% 
+    mutate(Dataset = "Von Bastian et al., 2016") %>% 
+    bind_rows(samples_P %>% 
+                select({{model}}) %>% 
+                mutate(Dataset = "Pratte et al., 2010")) %>% 
+    bind_rows(samples_RMy %>% 
+                select({{model}}) %>% 
+                mutate(Dataset = "Rey-Mermet et al., 2018")) %>% 
+    bind_rows(samples_E %>% 
+                select({{model}}) %>% 
+                mutate(Dataset = "Enkavi et al., 2019")) %>% 
+    group_by(Dataset) %>% 
+    summarize(samples = median({{model}}),
+              samples.lower = quantile({{model}}, 0.025),
+              samples.upper = quantile({{model}}, 0.975)) %>% 
+    ungroup()
+  
+  samples_plot <- samples %>% 
+    ggplot(aes(y = Dataset, x = samples, xmin = samples.lower, 
+               xmax = samples.upper, color = Dataset)) +
+    geom_pointinterval(position = position_dodge(width = .5)) +
+    scale_color_manual(values = manual_colors) +
+    scale_x_continuous(breaks = seq(min(samples$samples.lower), max(samples$samples.upper), length.out = 4), labels = label_number(accuracy = 0.01)) +
+    ggtitle(title) +
+    mytheme(base_size = 10.5) +
+    theme(legend.position = "none") +
+    labs(y = "", x = "") 
+  
+  if(y_labels == FALSE){
+    samples_plot <- samples_plot + 
+      theme(axis.text.y = element_blank())
+  }
+  
+  return(samples_plot)
+}
+
+p_signal_n <- plot_samples(n, "Normal", signal_vB, signal_P, signal_RMy, signal_E,y_labels = TRUE) + theme(axis.text.x = element_text(size = 8))
+p_signal_ln <- plot_samples(ln, "Lognormal", signal_vB, signal_P, signal_RMy, signal_E)+ theme(axis.text.x = element_text(size = 8))
+p_signal_sln <- plot_samples(sln, "Shifted Lognormal", signal_vB, signal_P, signal_RMy, signal_E) + labs(x = expression("Signal " ~ sigma[theta]))+ theme(axis.text.x = element_text(size = 8))
+p_signal_lnr <- plot_samples(lnr, "Lognormal race", signal_vB, signal_P, signal_RMy, signal_E)+ theme(axis.text.x = element_text(size = 8))
+p_signal_rdm <- plot_samples(rdm, "Racing diffusion", signal_vB, signal_P, signal_RMy, signal_E)+ theme(axis.text.x = element_text(size = 8))
+
+p_signal <- p_signal_n | p_signal_ln | p_signal_sln | p_signal_lnr | p_signal_rdm
+```
+
+```{r 'component-plot', cache = TRUE, fig.width = 8, fig.height = 4, message = FALSE, warning = FALSE, fig.cap = "(ref:comp-plot-caption)"}
+
+
+get_noise <- function(dat){
+  models <- c("n", "ln", "sln", "lnr", "rdm")
+  res <- list()
+  for(m in 1:length(models)){
+     res[[m]] <- readRDS(paste0("output/", str_to_upper(models[m]), "/ratio_", models[m], "_", dat, "_a.RDS"))$sigma
+     idx <- round(seq(from = 1, to = length(res[[m]]), length.out = 4000),0)
+     res[[m]] <- res[[m]][idx]
+  }
+  names(res) <- models
+  return(as.data.frame(res))
+}
+
+noise_vB <- get_noise("vB")
+noise_P <- get_noise("P") 
+noise_RMy <- get_noise("RMy")
+noise_E <- get_noise("E")
+
+p_noise_n <- plot_samples(n, "Normal", noise_vB, noise_P, noise_RMy, noise_E,y_labels = TRUE)+ theme(axis.text.x = element_text(size = 8)) + ggtitle("")
+p_noise_ln <- plot_samples(ln, "Lognormal", noise_vB, noise_P, noise_RMy, noise_E)+ theme(axis.text.x = element_text(size = 8)) + ggtitle("")
+p_noise_sln <- plot_samples(sln, "Shifted Lognormal", noise_vB, noise_P, noise_RMy, noise_E) + labs(x = expression("Noise " ~ sigma))+ theme(axis.text.x = element_text(size = 8)) + ggtitle("")
+p_noise_lnr <- plot_samples(lnr, "Lognormal Race", noise_vB, noise_P, noise_RMy, noise_E)+ theme(axis.text.x = element_text(size = 8)) + ggtitle("")
+p_noise_rdm <- plot_samples(rdm, "Racing Diffusion", noise_vB, noise_P, noise_RMy, noise_E)+ theme(axis.text.x = element_text(size = 7)) + ggtitle("")
+  
+p_noise <- p_noise_n | p_noise_ln | p_noise_sln | p_noise_lnr | p_noise_rdm
+p_signal / p_noise
+
+```
+
+
+```{r 'correspondence-analytical', cache = TRUE, fig.width = 7, fig.height = 3, message = FALSE, warning = FALSE, fig.cap = "(ref:corr-ana-cap)"}
+
+corresp_plot <- function(model){
+
+  # analytical 
+res <- readRDS(paste0("output/", str_to_upper(model), "/ratio_", model, "_P_a.RDS"))
+ratio_model_P_a <- res$ratio_a
+
+res_sim <- readRDS(paste0("output/", str_to_upper(model), "/ratio_", model, "_P.RDS"))
+ratio_model_P <- sqrt(res_sim)
+
+res <- readRDS(paste0("output/", str_to_upper(model), "/ratio_", model, "_RMy_a.RDS"))
+ratio_model_RMy_a <- res$ratio_a
+
+res_sim <- readRDS(paste0("output/", str_to_upper(model), "/ratio_", model, "_RMy.RDS"))
+ratio_model_RMy <-  sqrt(res_sim)
+
+res <- readRDS(paste0("output/", str_to_upper(model), "/ratio_", model, "_vB_a.RDS"))
+ratio_model_vB_a <- res$ratio_a
+
+res_sim <- readRDS(paste0("output/", str_to_upper(model), "/ratio_", model, "_vB.RDS"))
+ratio_model_vB <-  sqrt(res_sim)
+
+res <- readRDS(paste0("output/", str_to_upper(model), "/ratio_", model, "_E_a.RDS"))
+ratio_model_E_a <- res$ratio_a
+
+res_sim <- readRDS(paste0("output/", str_to_upper(model), "/ratio_", model, "_E.RDS"))
+ratio_model_E <-  sqrt(res_sim)
+
+corresp_model <- data.frame(analytic_P = ratio_model_P_a,
+           analytic_vB = ratio_model_vB_a,
+           analytic_RMy = ratio_model_RMy_a,
+           analytic_E = ratio_model_E_a,
+           simulated_P = ratio_model_P,
+           simulated_vB = ratio_model_vB,
+           simulated_RMy = ratio_model_RMy,
+           simulated_E = ratio_model_E) 
+
+
+p_corr <- corresp_model %>% 
+  pivot_longer(cols = everything(), names_to = "dataset", values_to = "ratio") %>%
+  group_by(dataset) %>% 
+  summarize(signal_to_noise = median((ratio)),
+              signal_to_noise.lower = quantile((ratio), 0.025),
+              signal_to_noise.upper = quantile((ratio), 0.975)) %>% 
+  ungroup() %>% 
+  separate(dataset, into = c("type", "dataset"), "_") %>% 
+  mutate(dataset = case_when(dataset == "E" ~ "Enkavi et al., 2019",
+                               dataset == "P" ~ "Pratte et al., 2010",
+                               dataset == "RMy" ~ "Rey-Mermet et al., 2018",
+                               dataset == "vB" ~ "Von Bastian et al., 2016")) %>% 
+  ggplot(aes(y = dataset, x = signal_to_noise, xmin = signal_to_noise.lower, 
+               xmax = signal_to_noise.upper)) +
+    geom_pointinterval(position = position_dodge(width = .5), aes(linetype = type)) +
+  mytheme(base_size = 8) +
+  labs(x = "Signal-to-noise ratio", y = "") +
+  ggtitle(model)
+
+return(p_corr)
+  
+}
+
+
+lnr_corresp <- corresp_plot("lnr")
+rdm_corresp <- corresp_plot("rdm")
+sln_corresp <- corresp_plot("sln")
+ln_corresp <- corresp_plot("ln")
+n_corresp <- corresp_plot("n")
+
+(n_corresp / ln_corresp / sln_corresp / lnr_corresp / rdm_corresp) 
+```
+
+
+```{r 'supplementary-plots-proof'}
+# Simulate data from inverse Gaussian and recover parameters via MLEs
+v <- 2
+beta <- 1
+sigma <- 1
+
+mu <- beta/v
+lambda <- (beta / sigma)^2
+L <- 80
+
+set.seed(123)
+dat <- rwald(L, mu, lambda)
+mu.hat <- mean(dat)
+invlambda.hat <- mean(1/dat)-1/mean(dat)
+
+v.hat <- 1/(mu.hat*sqrt(invlambda.hat))
+beta.hat <- 1/sqrt(invlambda.hat)
+
+# Sampling distribution of mu.hat, invlambda.hat
+nsim <- 1e3
+foo <- function(int, L, mu, lambda){
+	dat <- rwald(L, mu, lambda)
+	mu.hat <- mean(dat)
+	invlambda.hat <- mean(1/dat)-1/mean(dat)
+	v.hat <- 1/(mu.hat*sqrt(invlambda.hat))
+	beta.hat <- 1/(sqrt(invlambda.hat))
+	return(c(mu.hat, invlambda.hat, v.hat, beta.hat))
+}
+sims <- sapply(1:nsim, foo, L, mu, lambda)
+rownames(sims) <- c('mu.hat', 'invlambda.hat', 'v.hat', 'beta.hat')
+
+mu # expected mu.hat
+1/lambda-1/(lambda*L) # expected invlambda.hat
+apply(sims, 1, mean)
+
+par(mfrow = c(1,2))
+plot(seq(0, 3*mu, .025), dwald(seq(0, 3*mu, .025), mu, L*lambda), type = 'l', bty = 'n', ylab = 'Density', xlab = 'muhat', main = 'Mu')
+lines(density(sims[1,]), col = 2)
+legend('topright', c('Theoretical', 'Dens Est.'), col = c(1,2), pch = NA, lwd = 2, bty = 'n')
+
+plot(seq(0, 3/lambda, .005), dgamma(seq(0, 3/lambda, .005), shape = .5*(L-1), rate = .5*L*lambda), type = 'l', bty = 'n', ylab = 'Density', xlab = 'lambdainvhat', main = 'Lambda')
+lines(density(sims[2,]), col = 2)
+
+# Variance of v.hat
+mean(sims[3,])
+sqrt(L/(L-2))*(1/(beta*L) + v)
+var(sims[3,])
+L/(L-3)*(v^2 + 3/(beta^2*L^2) + 3*v/(beta*L)) - L*beta^2/(L-2)*(1/(L*beta^2)+v/beta)^2
+
+# Mean and variance of v.hat as a function of L
+Llist <- seq(10, 100, 10)
+v.hats <- c()
+for(L in Llist){
+	sims <- sapply(1:nsim, foo, L, mu, lambda)
+	v.hats  <- rbind(v.hats , c(mean(sims[3,]), sqrt(L/(L-2))*(1/(beta*L) + v), mean(sims[3,]^2), L/(L-3)*(v^2 + 3/(beta^2*L^2) + 3*v/(beta*L)), mean(sims[3,])^2, L*beta^2/(L-2)*(1/(L*beta^2)+v/beta)^2, var(sims[3,]),  L/(L-3)*(v^2 + 3/(beta^2*L^2) + 3*v/(beta*L)) - L*beta^2/(L-2)*(1/(L*beta^2)+v/beta)^2))
+}
+
+par(mfrow = c(2,2))
+plot(v.hats[,1], v.hats[,2], main = 'E[v.hat]')
+abline(a = 0, b= 1, col = 2)
+plot(v.hats[,3], v.hats[,4], main = 'E[v.hat^2]')
+abline(a = 0, b= 1, col = 2)
+plot(v.hats[,5], v.hats[,6], main = 'E[v.hat]^2')
+abline(a = 0, b= 1, col = 2)
+plot(v.hats[,7], v.hats[,8], main = 'Var[v.hat]')
+abline(a = 0, b= 1, col = 2)
+
+
+
+### Numerical examples ###
+library(extraDistr)
+
+v <- 2
+beta <- 1
+sigma <- 1
+
+mu <- beta/v
+lambda <- (beta / sigma)^2
+Llist <- seq(10, 100, 10)
+
+nsim <- 1e3
+
+
+foo <- function(int, L, mu, lambda){
+	dat <- rwald(L, mu, lambda)
+	Ybar <- mean(dat)
+	Q <- mean(1/dat)-1/mean(dat)
+	Yvar <- var(dat)
+	v.hat <- 1/(Ybar*sqrt(Q))
+	beta.hat <- 1/(sqrt(Q))
+	v.tilde <- sqrt(Ybar/Yvar)
+	beta.tilde <- sqrt(Ybar^3/Yvar)
+	return(c(Ybar, Q, Yvar, v.hat, beta.hat, v.tilde, beta.tilde))
+}
+
+
+set.seed(123)
+estList <- c()
+for(L in Llist){
+	sims <- sapply(1:nsim, foo, L, mu, lambda)
+	rownames(sims) <- c('Ybar', 'Q', 'Yvar', 'v.hat', 'beta.hat', 'v.tilde', 'beta.tilde')
+	Ev.hat <- sqrt(L/(L-2))*(1/(L*beta)+v)
+	Vv.hat <- L/(L-3)*(v^2 + 3/(L^2*beta^2) + 3*v/(L*beta)) - gamma((L-2)/2)^2/gamma((L-1)/2)^2*L/2*(1/(L*beta) + v)^2 # Stirling's approximation: gamma((L-2)/2)^2/gamma((L-1)/2)^2*L/2 ~ L/(L-2)
+	estList <- rbind(estList, c(L, mean(sims['v.hat',]), var(sims['v.hat',]), mean(sims['v.tilde',]), var(sims['v.tilde',]), Ev.hat, Vv.hat))
+}
+
+colnames(estList) <- c('L', 'sMeanv.hat', 'sVarv.hat', 'sMeanv.tilde', 'sVarv.tilde', 'Ev.hat', 'Vv.hat')
+
+png('NumericalExamplesRDM.png', res = 72*4, height = 480*4, width = 480*4)
+
+par(mfrow = c(2,2), mar = c(4, 4, 2, 2))
+matplot(1/estList[, 'L'], estList[, c('sMeanv.hat', 'sMeanv.tilde')], las = 1, bty = 'n', xlab = '1/K', ylab = 'Sample Mean', col=1:2, pch = 16, ylim = c(1.9, 2.5), cex.axis = 1.3, cex.lab = 1.3)
+text(1/estList[, 'L'], estList[, c('sMeanv.tilde')] + .05, estList[, 'L'], cex = .75, xpd = NA)
+legend('topleft', c(expression(hat('v')), expression(tilde('v'))), pch = 16, col = 1:2, bty = 'n')
+abline(h = v, lty = 2)
+
+matplot(1/estList[, 'L'], estList[, c('sVarv.hat', 'sVarv.tilde')], las = 1, bty = 'n', xlab = '1/K', ylab = 'Sample Variance', col=1:2, pch = 16, ylim = c(0, .8), cex.axis = 1.3, cex.lab = 1.3)
+text(1/estList[, 'L'], estList[, c('sVarv.tilde')] + .05, estList[, 'L'], cex = .75, xpd = NA)
+legend('topleft', c(expression(hat('v')), expression(tilde('v'))), pch = 16, col = 1:2, bty = 'n')
+
+plot(estList[, 'Ev.hat'], estList[, 'sMeanv.hat'], las = 1, bty = 'n', xlab = 'Theoretical Mean', ylab = 'Sample Mean', col=1, pch = 16, cex.axis = 1.3, cex.lab = 1.3)
+legend('topleft', expression(hat('v')), pch = 16, col = 1, bty = 'n')
+abline(a=0, b=1, lty = 2)
+
+plot(estList[, 'Vv.hat'], estList[, 'sVarv.hat'], las = 1, bty = 'n', xlab = 'Theoretical Variance', ylab = 'Sample Variance', col=1, pch = 16, cex.axis = 1.3, cex.lab = 1.3)
+legend('topleft', expression(hat('v')), pch = 16, col = 1, bty = 'n')
+abline(a=0, b=1, lty = 2)
+
+dev.off()
+
+
+
+### Joint estimation of (v1, v2, beta)
+
+v1 <- 1
+v2 <- 2
+beta <- 1
+sigma <- 1
+
+mu1 <- beta/v1
+mu2 <- beta/v2
+lambda <- (beta / sigma)^2
+
+L <- 80
+
+set.seed(123)
+dat <- cbind(rwald(L, mu1, lambda), rwald(L, mu2, lambda))
+mu.hat <- colMeans(dat)
+invlambda.hat <- mean(colMeans(1/dat)-1/colMeans(dat))
+
+v.hat <- 1/(mu.hat*sqrt(invlambda.hat))
+beta.hat <- 1/sqrt(invlambda.hat)
+
+# Sampling distribution of mu.hat, invlambda.hat
+nsim <- 1e3
+foo <- function(int, L, mu, lambda){
+	dat <- cbind(rwald(L, mu1, lambda), rwald(L, mu2, lambda))
+	mu.hat <- colMeans(dat)
+	invlambda.hat <- mean(colMeans(1/dat)-1/colMeans(dat))
+	v.hat <- 1/(mu.hat*sqrt(invlambda.hat))
+	beta.hat <- 1/sqrt(invlambda.hat)
+	return(c(mu.hat, invlambda.hat, v.hat, beta.hat))
+}
+sims <- sapply(1:nsim, foo, L, mu, lambda)
+rownames(sims) <- c('mu.hat1', 'mu.hat2', 'invlambda.hat', 'v.hat1', 'v.hat2', 'beta.hat')
+
+mu1 # expected mu.hat1
+mu2 # expected mu.hat2
+1/lambda-1/(lambda*L) # expected invlambda.hat
+apply(sims, 1, mean)
+
+par(mfrow = c(1,3))
+plot(seq(0, 3*mu1, .025), dwald(seq(0, 3*mu1, .025), mu1, L*lambda), type = 'l', bty = 'n', ylab = 'Density', xlab = 'muhat', main = 'Mu1')
+lines(density(sims[1,]), col = 2)
+legend('topright', c('Theoretical', 'Dens Est.'), col = c(1,2), pch = NA, lwd = 2, bty = 'n')
+
+plot(seq(0, 3*mu2, .025), dwald(seq(0, 3*mu2, .025), mu2, L*lambda), type = 'l', bty = 'n', ylab = 'Density', xlab = 'muhat', main = 'Mu2')
+lines(density(sims[2,]), col = 2)
+legend('topright', c('Theoretical', 'Dens Est.'), col = c(1,2), pch = NA, lwd = 2, bty = 'n')
+
+plot(seq(0, 3/lambda, .005), dgamma(seq(0, 3/lambda, .005), shape = (L-1), rate = L*lambda), type = 'l', bty = 'n', ylab = 'Density', xlab = 'lambdainvhat', main = 'Lambda')
+lines(density(sims[3,]), col = 2)
+
+
+bar <- function(int, L, mu1, mu2, lambda){
+	dat1 <- rwald(L, mu1, lambda)
+	dat2 <- rwald(L, mu2, lambda)
+	Ybar1 <- mean(dat1)
+	Ybar2 <- mean(dat2)
+	Q <- .5*(mean(1/dat1)-1/mean(dat1) + mean(1/dat2)-1/mean(dat2))
+	Yvar1 <- var(dat1)
+	Yvar2 <- var(dat2)
+	v1.hat <- 1/(Ybar1*sqrt(Q))
+	v2.hat <- 1/(Ybar2*sqrt(Q))
+	beta.hat <- 1/(sqrt(Q))
+	return(c(Ybar1, Ybar2, Q, Yvar1, Yvar2, v1.hat, v2.hat, beta.hat))
+}
+
+set.seed(123)
+estList <- c()
+for(L in Llist){
+	sims <- sapply(1:nsim, bar, L, mu1, mu2, lambda)
+	rownames(sims) <- c('Ybar1', 'Ybar2', 'Q', 'Yvar1', 'Yvar2', 'v1.hat', 'v2.hat', 'beta.hat')
+	Ev1.hat <- sqrt(L)*(1/(L*beta)+v1)*gamma(L-3/2)/gamma(L-1)
+	Ev2.hat <- sqrt(L)*(1/(L*beta)+v2)*gamma(L-3/2)/gamma(L-1)
+	Vv1.hat <- L/(L-2)*(v1^2 + 3/(L^2*beta^2) + 3*v1/(L*beta)) - Ev1.hat^2 #L*gamma(L-3/2)^2/gamma(L-1)^2*(1/(L*beta) + v1)^2
+	Vv2.hat <- L/(L-2)*(v2^2 + 3/(L^2*beta^2) + 3*v2/(L*beta)) - Ev2.hat^2 #L*gamma(L-3/2)^2/gamma(L-1)^2*(1/(L*beta) + v2)^2
+	Covv <- (L/(L-2)*(v1+1/(beta*L))*(v2+1/(beta*L)) - Ev1.hat*Ev2.hat)
+	estList <- rbind(estList, c(L, mean(sims['v1.hat',]), mean(sims['v2.hat',]), var(sims['v1.hat',]), var(sims['v2.hat',]), cov(sims['v1.hat',], sims['v2.hat',]), Ev1.hat, Ev2.hat, Vv1.hat, Vv2.hat, Covv))
+}
+
+colnames(estList) <- c('L', 'sMeanv1.hat', 'sMeanv2.hat', 'sVarv1.hat', 'sVarv2.hat', 'sCovv', 'Ev1.hat', 'Ev2.hat', 'Vv1.hat', 'Vv2.hat', 'Covv')
+
+png('/Users/udo/Dropbox/to read/DASC model/NumericalExamplesvhatRDM2.png', res = 72*4, height = 480*4, width = 480*4)
+
+par(mfrow = c(2,2), mar = c(4, 4, 2, 2))
+plot(estList[, 'Ev1.hat'], estList[, 'sMeanv1.hat'], las = 1, bty = 'n', xlab = 'Theoretical Mean', ylab = 'Sample Mean', col=1, pch = 16, cex.axis = 1.3, cex.lab = 1.3, main = expression(hat('v')[1]))
+text(estList[, 'Ev1.hat'], estList[, 'sMeanv1.hat'] + .02, estList[, 'L'], cex = .75, xpd = NA)
+abline(a=0, b=1, lty = 2)
+
+plot(estList[, 'Ev2.hat'], estList[, 'sMeanv2.hat'], las = 1, bty = 'n', xlab = 'Theoretical Mean', ylab = 'Sample Mean', col=1, pch = 16, cex.axis = 1.3, cex.lab = 1.3, main = expression(hat('v')[2]))
+abline(a=0, b=1, lty = 2)
+
+plot(estList[, 'Vv1.hat'], estList[, 'sVarv1.hat'], las = 1, bty = 'n', xlab = 'Theoretical Variance', ylab = 'Sample Variance', col=1, pch = 16, cex.axis = 1.3, cex.lab = 1.3, main = expression(hat('v')[1]))
+abline(a=0, b=1, lty = 2)
+
+plot(estList[, 'Vv2.hat'], estList[, 'sVarv2.hat'], las = 1, bty = 'n', xlab = 'Theoretical Variance', ylab = 'Sample Variance', col=1, pch = 16, cex.axis = 1.3, cex.lab = 1.3, main = expression(hat('v')[2]))
+abline(a=0, b=1, lty = 2)
+
+dev.off()
+
+png('/Users/udo/Dropbox/to read/DASC model/NumericalExamplesCovRDM.png', res = 72*4, height = 480*4, width = 480*4)
+plot(estList[, 'Covv'], estList[, 'sCovv'], las = 1, bty = 'n', xlab = 'Theoretical Covariance', ylab = 'Sample Covariance', col=1, pch = 16, cex.axis = 1.3, cex.lab = 1.3)
+abline(a=0, b=1, lty = 2)
+dev.off()
+
+png('NumericalExamplessVarRDM.png', res = 72*4, height = 480*4, width = 480*4)
+par(mar = c(4.8, 4.8, 1.1, 1.1), mgp = c(3.25, 1, 0))
+plot(1/estList[, 'L'], estList[, 'sVarv1.hat']+estList[, 'sVarv2.hat']-2*estList[, 'sCovv'], las = 1, bty = 'n', xlab = '1/K', ylab = expression(paste('Sample Variance ', Delta, 'v')), col=1, pch = 16, cex.axis = 1.7, cex.lab = 1.7, cex = 1.5)
+abline(a=0, b=.5*(v1-v2)^2 + (v1+v2), lty = 2)
+text(.075, .3, expression(paste('y = (0.5', ('v'[1]-'v'[2])^2+('v'[1]+'v'[2]), ')', frac(1,'K'))), xpd = NA, cex = 1.5, srt = atan(.5*(v1-v2)^2 + (v1+v2))*90/pi)
+text(1/estList[, 'L'], estList[, 'sVarv1.hat']+estList[, 'sVarv2.hat']-2*estList[, 'sCovv'] + .02, estList[, 'L'], cex = 1, xpd = NA)
+dev.off()
+
+```
+

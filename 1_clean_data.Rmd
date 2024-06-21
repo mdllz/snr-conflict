@@ -1,0 +1,204 @@
+
+```{r}
+library(DBI)
+library(RSQLite)
+library(dplyr)
+library(tidyr)
+```
+
+
+
+```{r 'connect-to-db-file'}
+conn <- DBI::dbConnect(RSQLite::SQLite(), "acdc.db")
+
+# get overview of metadata table
+publications <- DBI::dbGetQuery(conn, "select * from publication_table")
+# publication_id: Enkavi = 2, Pratte = 5, Rey-Mermet = 6, von Bastian = 9 
+studies <- DBI::dbGetQuery(conn, "select * from study_table where publication_id in (2,5,6,9)")
+datasets <- DBI::dbGetQuery(conn, "select * from dataset_table where study_id in (2,26,28,31)")
+tasks <- DBI::dbGetQuery(conn, "select * from task_table")
+
+```
+
+```{r 'sql-query'}
+# SQL query to get datasets of interest: Pratte et al., von Bastian et al., Rey-Mermet et al., Enkavi et al. (Stroop only) 
+query <- "
+    SELECT p.publication_id, p.publication_code, s.study_id, b.group_description, b.between_id, o.*
+    FROM observation_table o
+    JOIN dataset_table d ON o.dataset_id = d.dataset_id
+    JOIN study_table s ON d.study_id = s.study_id
+    JOIN publication_table p ON s.publication_id = p.publication_id
+    JOIN task_table q ON d.task_id = q.task_id
+    JOIN between_table b ON s.study_id = b.study_id
+    WHERE 
+        p.publication_id IN (2,5,6,9) 
+        AND s.study_id IN (2, 26, 28, 31)
+        AND q.task_name = 'stroop'
+        AND d.dataset_id IN (2,30,40,34)
+"
+
+dat <- DBI::dbGetQuery(conn, query)
+DBI::dbDisconnect(conn)
+
+# Rey-Mermet et al.
+dataset4 <- read.csv("https://raw.githubusercontent.com/jstbcs/acdc-database/main/data/mermet_2018_should/numStroop.dat.txt", sep = " ") %>% mutate(id = row_number())
+trialnumber <- dataset4 %>% group_by(sub, block) %>% mutate(trial = row_number()) %>% ungroup()
+dataset4 <- left_join(dataset4, trialnumber, by = c("id", "sub", "ageGroup", "block", "trialType", "cond", "stim", "acc", "rt")) %>%
+  mutate(congruency = ifelse(cond == "congruent", 1, ifelse(cond == "incongruent", 2, ifelse(cond == "neutral", 3, NA))),
+         congruency = as.factor(congruency),
+         block = ifelse(block == "practice", -999, substring(block ,nchar(block))),
+         datasetid = 4,
+         subject =  sub - 100, 
+         subject = as.factor(subject),
+         accuracy = ifelse(acc < 97, acc, NA),     # 97 and 99 in raw data are excluded trials
+         between = ageGroup,        
+         within = NA) %>%
+  select(datasetid, subject, block, trial, congruency, between, within, accuracy, rt) %>%
+  group_split(between) 
+reymermet_raw <- dataset4[[1]] # age group 1 only
+
+
+# Enkavi et al. 
+dataset51a <- read.csv("https://raw.githubusercontent.com/jstbcs/acdc-database/main/data/enkavi_2019_large/stroop.csv", sep = ",") 
+trialnumber  <- dataset51a %>% group_by(worker_id, exp_stage) %>% mutate(trial = row_number()) %>%  ungroup() # code trial number
+dataset51a <- dataset51a %>%
+  mutate(
+    datasetid = rep(51, nrow(dataset51a)), 
+    subject = as.numeric(stringr::str_split_fixed(worker_id, stringr::fixed("s"), 2)[, 2]), 
+    block = ifelse(exp_stage == "practice", -999, 1),
+    trial = trialnumber$trial, 
+    congruency = ifelse(condition == "congruent", 1, 2),
+    between = NA, 
+    within = 1, # first wave; test phase 
+    accuracy = correct, 
+    rt = rt / 1000
+  ) %>% 
+  select(datasetid, subject, block, trial, congruency, between, within, accuracy, rt) 
+enkavi_raw <- dataset51a
+
+pratte_raw <- dat %>% 
+  filter(publication_code == "pratte_2010_exploring")
+
+
+vonbastian_raw <- dat %>% 
+  filter(publication_code == "vonbastiaan_2015_evidence")
+
+
+```
+
+
+```{r, eval = F}
+# entire distribution
+hist(reymermet_raw$rt,breaks = 30)
+hist(pratte_raw$rt,breaks = 30)
+hist(vonbastian_raw$rt,breaks = 30)
+hist(enkavi_raw$rt,breaks = 30)
+
+# tail
+hist(reymermet_raw$rt,breaks = 100, xlim = c(1.5,2))
+hist(pratte_raw$rt,breaks = 500, xlim = c(1.5,2))
+hist(vonbastian_raw$rt,breaks = 100, xlim = c(1.5,2))
+hist(enkavi_raw$rt,breaks = 100, xlim = c(1.5,2))
+
+
+# tail
+hist(reymermet_raw$rt,breaks = 100, xlim = c(0,0.4))
+hist(pratte_raw$rt,breaks = 1000, xlim = c(0,0.4))
+hist(vonbastian_raw$rt,breaks = 100, xlim = c(0,0.4))
+hist(enkavi_raw$rt,breaks = 100, xlim = c(0,0.4))
+  
+```
+
+```{r 'RT-cleaning'}
+reymermet <- reymermet_raw %>% 
+  filter(block != -999) %>% 
+  group_by(subject, block) %>% 
+  # remove first 3 trials of each block
+  slice(4:n()) %>% 
+  ungroup() %>% 
+  # remove neutral condition
+  filter(congruency != 3) %>% 
+  # remove too fast and too slow trials
+  filter(rt > 0.25 & rt < 1.9) %>% 
+  # remove people with too few trials
+  filter(subject != 41)
+
+vonbastian <- vonbastian_raw %>% 
+  filter(block != -999) %>% 
+  group_by(subject, block) %>% 
+  # remove first 3 trials of each block
+  slice(4:n()) %>% 
+  ungroup() %>% 
+  # remove neutral condition
+  filter(congruency != 3) %>% 
+  filter(rt > 0.25)
+
+pratte <- pratte_raw %>% 
+  filter(block != -999) %>% 
+  group_by(subject, block) %>% 
+  # remove first 3 trials of each block
+  slice(4:n()) %>% 
+  ungroup() %>% 
+  # remove neutral condition
+  filter(congruency != 3) %>% 
+  filter(rt > 0.25, rt < 3) 
+
+
+enkavi <- enkavi_raw %>% 
+  filter(block != -999) %>% 
+  group_by(subject, block) %>% 
+  # remove first 3 trials of each block
+  slice(4:n()) %>% 
+  ungroup() %>% 
+  # remove neutral condition
+  filter(congruency != 3) %>% 
+  filter(rt > 0.25, rt <= 1.5) %>% 
+  filter(subject != 295) ## too few trials
+
+
+```
+
+
+```{r}
+# too few trials
+reymermet %>% group_by(subject) %>% count() %>% arrange(n) # 41
+vonbastian %>% group_by(subject) %>% count() %>% arrange(n)
+pratte %>% group_by(subject) %>% count() %>% arrange(n)
+enkavi%>% group_by(subject, congruency) %>% count() %>% arrange(n) # 295
+
+
+```
+
+```{r}
+# acc < 0.5
+reymermet_raw %>% 
+  group_by(subject) %>% 
+  summarize(meanacc = mean(accuracy)) %>% 
+  arrange(meanacc)
+
+pratte_raw %>% 
+  group_by(subject) %>% 
+  summarize(meanacc = mean(accuracy)) %>% 
+  arrange(meanacc)
+
+vonbastian_raw %>% 
+  group_by(subject) %>% 
+  summarize(meanacc = mean(accuracy)) %>% 
+  arrange(meanacc)
+
+enkavi_raw %>% 
+  group_by(subject) %>% 
+  summarize(meanacc = mean(accuracy)) %>% 
+  arrange(meanacc)
+```
+
+
+```{r 'save-data'}
+#write.csv(vonbastian, file = "cleaned_data/vonbastianetal_2016.csv", row.names = F)
+#write.csv(reymermet, file = "cleaned_data/reymermetetal_2018.csv", row.names = F)
+#write.csv(pratte, file = "cleaned_data/pratteetal_2010.csv", row.names = F)
+#write.csv(enkavi, file = "cleaned_data/enkavietal_2019.csv", row.names = F)
+
+```
+
+

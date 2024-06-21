@@ -1,0 +1,144 @@
+```{r}
+library(rstan)
+library(dplyr)
+library(tidyr)
+library(purrr)
+```
+
+
+```{r 'compute-rmse'}
+rmse <- function(y_hat, y){
+  res <- sqrt(sum((y_hat-y)^2/length(y)))
+  return(res)
+}
+compute_rmse <- function(dataset, path_to_model_object, cm = FALSE, n_pred = 500){
+  model_object <- readRDS(path_to_model_object)
+  
+  # observed quantiles for correct responses
+  y_q <- quantile(dataset$rt[dataset$accuracy == 1], c(0.01, 0.1, 0.3, 0.5, 0.7, 0.9, 0.99))
+  
+  # predicted quantiles for correct responses
+  if(cm == TRUE){ # cognitive model: lnr or rdm
+    filler <- -9999
+
+    # get posterior predictives
+    y_pred <- rstan::extract(model_object, "Y_pred")$Y_pred[,,,]
+    idx <- round(seq(from = 1, to = dim(y_pred)[1], length.out = n_pred),0)
+    I <- length(unique(dataset$subject))
+    J <- dataset %>% group_by(subject) %>% count() %>% pull(n) %>% max()
+    
+    pp_dat <- matrix(aperm(y_pred[idx,,,], c(3,2,1,4)), ncol = 3) %>% 
+      as.data.frame() %>% 
+      rename("rt" = V1, "accuracy" = V2, "cond" = V3) %>% 
+      mutate(pp = rep(1:n_pred, each = I*J),
+             s = rep(rep(1:I, each = J), times = n_pred)) %>% 
+      filter(rt != filler, accuracy != filler, cond != filler)
+    
+    pp_q <- pp_dat %>%
+      filter(accuracy == 1) %>% 
+      group_by(pp) %>% 
+      summarise(q01 = quantile(rt, 0.01),
+                q10 = quantile(rt, 0.1),
+                q30 = quantile(rt, 0.3),
+                q50 = quantile(rt, 0.5),
+                q70 = quantile(rt, 0.7),
+                q90 = quantile(rt, 0.9),
+                q99 = quantile(rt, 0.99)) %>% 
+      select(-pp)
+    
+    # rmse computation rt
+    rmse_rt <- rep(NA, nrow(pp_q))
+    for(rep in 1:nrow(pp_q)){
+      rmse_rt[rep] <- rmse(pp_q[rep,], y_q)
+      
+    # rmse computation accuracy
+    y_acc <- mean(dataset$accuracy == 1)
+    pp_acc <- pp_dat %>% 
+      group_by(pp) %>% 
+      summarize(meanAcc = mean(accuracy == 1)) %>% 
+      pull(meanAcc)
+    
+    rmse_acc <- rep(NA, nrow(pp_q))
+    for(rep in 1:nrow(pp_q)){
+      rmse_acc[rep] <- rmse(pp_acc[rep],y_acc)
+     }
+    }
+    rmse_res <- list(rmse_rt, rmse_acc)
+    } else { # normal, lognormal, shifted lognormal
+      y_pred <- rstan::extract(model_object, "y_pred")$y_pred
+      idx <- round(seq(from = 1, to = nrow(y_pred), length.out = n_pred),0)
+      pp_q <- apply(y_pred[idx,], 1, function(x) quantile(x, c(0.01, 0.1, 0.3, 0.5, 0.7, 0.9, 0.99)))
+      
+      # rmse computation
+      rmse_rt <- rep(NA, ncol(pp_q))
+      for(rep in 1:ncol(pp_q)){
+          rmse_rt[rep] <- rmse(pp_q[,rep], y_q)
+      }
+      rmse_res <- list(rmse_rt)
+    }
+  return(rmse_res)
+}
+
+# load data
+enkavi <- read.csv("cleaned_data/enkavietal_2019.csv")
+pratte <- read.csv("cleaned_data/pratteetal_2010.csv")
+reymermet <- read.csv("cleaned_data/reymermetetal_2018.csv")
+vonbastian <- read.csv("cleaned_data/vonbastianetal_2016.csv")
+
+# rmse
+model_paths <- c("N/n", "LN/ln", "SLN/sln", "LNR/lnr", "RDM/rdm")
+# von Bastian et al.
+rmse_vB_no_cm <- purrr::map(.x = 1:3, ~ compute_rmse(dataset = vonbastian, path_to_model_object = paste0("output/", model_paths[.x], "_vonbastian.RDS")))
+rmse_vB_cm <- purrr::map(.x = 4:5, ~ compute_rmse(dataset = vonbastian, path_to_model_object = paste0("output/", model_paths[.x], "_vonbastian.RDS"), cm = TRUE))
+# Pratte et al.
+rmse_P_no_cm <- purrr::map(.x = 1:3, ~ compute_rmse(dataset = pratte, path_to_model_object = paste0("output/", model_paths[.x], "_pratte.RDS")))
+rmse_P_cm <- purrr::map(.x = 4:5, ~ compute_rmse(dataset = pratte, path_to_model_object = paste0("output/", model_paths[.x], "_pratte.RDS"), cm = TRUE))
+# Enkavi et al.
+rmse_E_no_cm <- purrr::map(.x = 1:3, ~ compute_rmse(dataset = enkavi, path_to_model_object = paste0("output/", model_paths[.x], "_enkavi.RDS")))
+rmse_E_cm <- purrr::map(.x = 4:5, ~ compute_rmse(dataset = enkavi, path_to_model_object = paste0("output/", model_paths[.x], "_enkavi.RDS"), cm = TRUE))
+# Rey-Mermet et al.
+rmse_RMy_no_cm <- purrr::map(.x = 1:3, ~ compute_rmse(dataset = reymermet, path_to_model_object = paste0("output/", model_paths[.x], "_reymermet.RDS")))
+rmse_RMy_cm <- purrr::map(.x = 4:5, ~ compute_rmse(dataset = reymermet, path_to_model_object = paste0("output/", model_paths[.x], "_reymermet.RDS"), cm = TRUE))
+
+#save(rmse_vB_no_cm, rmse_vB_cm, rmse_P_no_cm, rmse_P_cm, rmse_E_no_cm, rmse_E_cm, rmse_RMy_no_cm, rmse_RMy_cm, file = "output/rmse.RData")
+
+hist(rmse_vB_no_cm[[1]][[1]])
+hist(rmse_vB_no_cm[[2]][[1]])
+hist(rmse_vB_no_cm[[3]][[1]])
+hist(rmse_vB_cm[[1]][[1]])
+hist(rmse_vB_cm[[2]][[1]])
+
+compute_CrI_rt <- function(rmse_list){
+  CrI_list <- list()
+  for(i in 1:length(rmse_list)){
+    CrI_list[[i]] <- quantile(rmse_list[[i]][[1]], probs = c(0.025, 0.5, 0.975))
+  }
+  CrI <- bind_rows(CrI_list)
+  return(CrI)
+}
+
+compute_CrI_acc <- function(rmse_list){
+  CrI_list <- list()
+  for(i in 1:length(rmse_list)){
+    CrI_list[[i]] <- quantile(rmse_list[[i]][[2]], probs = c(0.025, 0.5, 0.975))
+  }
+  CrI <- bind_rows(CrI_list)
+  return(CrI)
+}
+
+round(compute_CrI_acc(rmse_vB_cm),3)
+round(compute_CrI_acc(rmse_P_cm),3)
+round(compute_CrI_acc(rmse_E_cm),3)
+round(compute_CrI_acc(rmse_RMy_cm),3)
+
+round(compute_CrI_rt(rmse_vB_cm),3)
+round(compute_CrI_rt(rmse_P_cm),3)
+round(compute_CrI_rt(rmse_E_cm),3)
+round(compute_CrI_rt(rmse_RMy_cm),3)
+
+
+round(compute_CrI_rt(rmse_vB_no_cm),3)
+round(compute_CrI_rt(rmse_P_no_cm),3)
+round(compute_CrI_rt(rmse_E_no_cm),3)
+round(compute_CrI_rt(rmse_RMy_no_cm),3)
+```
