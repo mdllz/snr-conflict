@@ -675,6 +675,7 @@ load("output/N/n_samples_E.RData") # load previously saved samples
 res_n_E_a <- sn_n_analytical(n_extract_E)
 
 #saveRDS(res_n_E_a, "output/N/ratio_n_E_a.RDS")
+
 ```
 
 
@@ -760,19 +761,6 @@ hist(sqrt(ratio))
 save(effect_var_mean, sigma_theta, ratio, file = "output/N/ratio_and_components_n_vB.RData")
 saveRDS(ratio, file = "output/N/ratio_vB.RDS")
 
-getwd()
-
-load("output/N/n_samples_vB.RData")
-load("output/N/ratio_and_components_n_vB.RData")
-median(n_extract_vB$theta_sigma/rowMeans(n_extract_vB$sigma))
-median(sqrt(ratio))
-hist(sqrt((effect_var_mean*mean(trialnr_vB$n))/2), xlim = c(0.19, 0.23))
-hist(rowMeans(n_extract_vB$sigma), xlim = c(0.19, 0.23))
-hist(rowMeans(n_extract_vB$sigma), xlim = c(0.19, 0.23))
-mean(sqrt((effect_var_mean*40)/2))
-mean(rowMeans(n_extract_vB$sigma))
-# 40 instead of 46.5 trials
-
 
 # Rey-Mermet et al. ----------------------------------------------------------------
 
@@ -812,7 +800,7 @@ hist(sqrt(ratio))
 # Enkavi et al. ----------------------------------------------------------------
 
 # get samples from stanfit 
-load("n_samples_E.RData")
+load("output/N/n_samples_E.RData") # load previously saved samples
 
 # compute r
 I <- ncol(n_extract_E$mu_c) # nr of participants

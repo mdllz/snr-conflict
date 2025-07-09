@@ -1,0 +1,86 @@
+```{r}
+datasets <- list(
+  enkavietal_2019 = read_csv("cleaned_data/enkavietal_2019.csv"),
+  vonbastianetal_2016 = read_csv("cleaned_data/vonbastianetal_2016.csv"),
+  reymermetetal_2018 = read_csv("cleaned_data/reymermetetal_2018.csv"),
+  pratteetal_2010 = read_csv("cleaned_data/pratteetal_2010.csv")
+)
+
+# Function to compute descriptives
+get_descriptives <- function(data, name) {
+  summary_df <- data.frame(
+    dataset = name,
+    mean_rt = round(mean(data$rt), 2),
+    sd_rt = round(sd(data$rt), 2),
+    mean_accuracy = round(mean(data$accuracy), 2),
+    n_subjects = length(unique(data$subject))
+  )
+  
+  counts <- data %>%
+    group_by(subject, congruency) %>%
+    count(name = "n") %>%
+    arrange(desc(n))
+  
+  list(summary = summary_df, counts = counts)
+}
+
+summary_list <- lapply(names(datasets), function(name) {
+  get_descriptives(datasets[[name]], name)
+})
+
+summary_stats <- do.call(rbind, lapply(summary_list, `[[`, "summary"))
+
+count_tables <- setNames(lapply(summary_list, `[[`, "counts"), names(datasets))
+
+print(summary_stats)
+
+```
+
+```{r}
+extract_summary <- function(modelfit, params, model, subject) {
+  extracted <- rstan::extract(modelfit, params)
+  extracted_df <- as.data.frame(extracted)
+  
+  medians <- apply(extracted_df, 2, median)
+  ci <- t(apply(extracted_df, 2, quantile, probs = c(0.025, 0.975)))
+  
+  # Combine into a tidy data.frame
+  result <- data.frame(
+    model = model,
+    subject = subject,
+    parameter = rownames(ci),
+    median = round(medians, 2)[rownames(ci)],
+    CI_2.5 = round(ci[,1], 2),
+    CI_97.5 = round(ci[,2], 2),
+    row.names = NULL
+  )
+  
+  return(result)
+}
+
+
+models <- list(
+  N = c("theta_mu", "theta_sigma", "alpha_mu", "alpha_sigma"),
+  LN = c("theta_mu", "theta_sigma", "alpha_mu", "alpha_sigma"),
+  SLN = c("theta_mu", "theta_sigma", "alpha_mu", "alpha_sigma"),
+  LNR = c("theta_mu", "theta_sigma", "alpha_1_mu", "alpha_1_sigma", "alpha_2"),
+  RDM = c("theta_mu", "theta_sigma", "alpha_1_mu", "alpha_1_sigma", "alpha_2")
+)
+
+subjects <- c("enkavi", "pratte", "reymermet", "vonbastian")
+
+
+all_results <- do.call(rbind, lapply(names(models), function(model_name) {
+  params <- models[[model_name]]
+  do.call(rbind, lapply(subjects, function(subject) {
+    file_path <- sprintf("output/%s/%s_%s.RDS", model_name, tolower(model_name), subject)
+    modelfit <- readRDS(file_path)
+    extract_summary(modelfit, params, model_name, subject)
+  }))
+}))
+
+
+print(all_results)
+
+```
+

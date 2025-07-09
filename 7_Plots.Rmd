@@ -8,6 +8,7 @@ library(dplyr)
 library(tidyr)
 library(stringr)
 library(ggdist)
+library(splithalf)
 ```
 
 ```{r 'model-overview', fig.cap = "Model overview", fig.height=3, fig.width = 6, cache = TRUE, warning = FALSE}
@@ -176,6 +177,105 @@ p_rdm <-
 (p_normal / p_lognormal / p_shifted_lognormal) | (p_lnr / p_rdm)
 
 ```
+
+```{r 'pp-plot-vB-illustration'}
+
+# plot posterior predictive checks of the rt distribution
+pp_check_rt <- function(data = NULL, folder = NULL, modelobject = NULL, stanfit = NULL, reps = 100,
+                        baseSize = 15, axis_color_x = "black", axis_color_y = "black",
+                        plot_title = NULL, x_label = NULL, acc = FALSE) {
+  
+  # Load model object if it is not supplied
+  if (is.null(stanfit)) {
+    stanfit <- readRDS(paste0("output/", folder, "/", modelobject))
+  }
+
+  # Extract posterior predictions
+  if(!acc){
+    y_pred <- rstan::extract(stanfit, pars = "y_pred", permuted = TRUE)$y_pred
+    
+    total_draws <- dim(y_pred)[1]
+    sampled_rows <- sample(total_draws, reps)
+    yrep <- y_pred[sampled_rows, ]
+  } else {
+    
+    y_pred <- rstan::extract(stanfit, "Y_pred")$Y_pred
+    total_draws <- dim(y_pred)[1]
+    sampled_rows <- sample(total_draws, reps)
+
+    # Extract the RTs (1st element in 4th dimension)
+    rt_array <- y_pred[sampled_rows, , , 1]  
+    
+    # Reshape to matrix: each row = rep, each column = flattened trial × participant
+    # We want to keep repetitions along rows, and flatten the rest (columns)
+    rt_matrix <- apply(rt_array, 1, function(x) as.vector(x))  
+    
+    # Transpose to get desired [100 x 11616] format
+    rt_matrix[rt_matrix == -9999] <- NA
+    yrep <- t(na.omit(rt_matrix))
+    
+  }
+  
+
+  # y is the observed RT data 
+  y <- data %>% pull(rt)
+
+
+  color_scheme_set("gray")
+  bayesplot_theme_set(
+    theme_default(base_size = baseSize) +
+      theme(
+        text = element_text(family = ""),
+       # axis.title.x = element_text(color = axis_color_x),
+        axis.line.x = element_line(color = axis_color_x, linewidth = 0.5),
+        axis.line.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        legend.position = "none",
+        plot.title = element_text(hjust = 0, size = baseSize + 1)
+      )
+  )
+  
+  pp_plot <- ppc_dens_overlay(y, yrep) +
+    labs(title = plot_title, x = x_label) +
+    scale_x_continuous(limits = c(-0.3, 3)) +
+    geom_vline(xintercept = 0, color = axis_color_x, linewidth = 0.5)
+  
+  return(pp_plot)
+}
+
+
+
+vonbastian <- read.csv("cleaned_data/vonbastianetal_2016.csv")
+cols <- scales::viridis_pal(option="plasma", end = 0.8)(5)
+
+p_normal <- pp_check_rt(data=vonbastian %>% filter(accuracy == 1), folder = "N", 
+                        modelobject = "n_vonbastian.RDS", reps = 500,
+                        baseSize = 15, axis_color_x = cols[1], axis_color_y = cols[1],
+                        plot_title = "Normal", x_label = NULL)
+p_lognormal <- pp_check_rt(data=vonbastian %>% filter(accuracy == 1), folder = "LN", 
+                        modelobject = "ln_vonbastian.RDS", reps = 500,
+                        baseSize = 15, axis_color_x = cols[2], axis_color_y = cols[2],
+                        plot_title = "Lognormal", x_label = NULL)
+p_slognormal <- pp_check_rt(data=vonbastian %>% filter(accuracy == 1), folder = "SLN", 
+                        modelobject = "sln_vonbastian.RDS", reps = 500,
+                        baseSize = 15, axis_color_x = cols[3], axis_color_y = cols[3],
+                        plot_title = "Shifted lognormal", x_label = "Response time")
+p_lnr <- pp_check_rt(data=vonbastian, folder = "LNR", 
+                        modelobject = "lnr_vonbastian.RDS", reps = 500,
+                        baseSize = 15, axis_color_x = cols[4], axis_color_y = cols[4],
+                        plot_title = "Lognormal race", x_label = NULL, acc=TRUE)
+p_rdm <- pp_check_rt(data=vonbastian, folder = "RDM", 
+                        modelobject = "rdm_vonbastian.RDS", reps = 500,
+                        baseSize = 15, axis_color_x = cols[5], axis_color_y = cols[5],
+                        plot_title = "Racing diffusion", x_label = NULL, acc=TRUE)
+
+p_vB <- p_normal | p_lognormal | p_slognormal | p_lnr | p_rdm
+
+
+```
+
 
 ```{r 'cdf'}
 plot_cdf_pp_cm <- function(data, modelfit, modelname, reversed = FALSE, npred = 500, subject = NULL, factors = NULL, stat = NULL, 
@@ -821,6 +921,44 @@ mytheme <- function(base_family = "Arial", base_size = 15){
   
 }
 
+get.splithalf <- function(dats){
+  #dats$congruency <- factor(dats$congruency, levels = 1:2, labels = c("congruent", "incongruent"))
+  difference <- splithalf(data = dats,
+                          outcome = "RT",
+                          score = "difference",
+                          halftype = "random",
+                          permutations = 5400,
+                          var.RT = "rt",
+                          var.participant = "subject",
+                          var.compare = "congruency",
+                          compare1 = "congruent",
+                          compare2 = "incongruent",
+                          average = "mean",
+                          plot = TRUE
+                          )
+  return(c(sh = difference$final_estimates$splithalf,
+           sh.lower = difference$final_estimates[,"95_low"],
+           sh.upper = difference$final_estimates[,"95_high"],
+           sb = difference$final_estimates[,"spearmanbrown"],
+           sb.lower = difference$final_estimates[,"SB_low"],
+           sb.upper = difference$final_estimates[,"SB_high"]))
+}
+
+gamma_to_reliability <- function(gamma, K){
+  r <- (gamma^2) / ((gamma^2)+(2/K))
+  return(r)
+}
+
+extract_k <- function(dat){
+  k <- dat %>% 
+    filter(accuracy == 1) %>% 
+    group_by(subject, congruency) %>% 
+    count()
+  
+  return(mean(k$n))
+}
+
+
 # load samples and create datasets
 ratios_vB <- ratios_P <- ratios_RMy <- ratios_E <- 
   signal_vB <- signal_P <- signal_RMy <- signal_E <-
@@ -917,62 +1055,121 @@ sn_ratios <- (ratios_RMy) %>%
                          Model == "Normal" ~ 5)) %>% 
   arrange(dataset, idx)
 
+
 sn_plot_by_data <- sn_ratios %>% 
   ggplot(aes(y = dataset, x = signa, xmin = signa.lower, 
              xmax = signa.upper, color = as.character(idx))) +
   geom_pointinterval(position = position_dodge(width = .5)) +
-  scale_color_viridis_d(option = "plasma", end = 0.8, limits = rev, labels = c("Normal", "Lognormal", "Shifted-lognormal", "Lognormal race", "Racing diffusion")) +
+  scale_color_viridis_d(option = "plasma", end = 0.8, limits = rev, 
+                        labels = c("Normal", "Lognormal", "Shifted-lognormal", "Lognormal race", "Racing diffusion")) +
   scale_y_discrete(limits = rev) +
   ggtitle("") +
   labs(x = "Signal-to-noise ratio" ~ gamma, y = "", color = "") +
   geom_vline(xintercept = 0, col = "grey70") +
-  #scale_x_continuous(limits = c(0, 0.38)) +
-  mytheme(base_size = 12) 
+  mytheme(base_size = 12) +
+  theme(legend.position = "none")   # Remove y-axis title
 
-sn_plot_by_models <- sn_ratios %>%
-  mutate(idx = as.character(case_when(Model == "Lognormal" ~ 4,
-                         Model == "Shifted-lognormal" ~ 3,
-                         Model == "LNR" ~ 2,
-                         Model == "RDM" ~ 1,
-                         Model == "Normal" ~ 5))) %>% 
-  ggplot(aes(y = as.character(idx), x = signa, xmin = signa.lower, 
-             xmax = signa.upper, color = dataset)) +
+
+sh_pratte <- get.splithalf(pratte %>% mutate(congruency = ifelse(congruency == 1, "congruent", "incongruent")))
+sh_enkavi <- get.splithalf(enkavi %>% mutate(congruency = ifelse(congruency == 1, "congruent", "incongruent")))
+sh_reymermet <- get.splithalf(reymermet %>% mutate(congruency = ifelse(congruency == 1, "congruent", "incongruent")))
+sh_vonbastian <- get.splithalf(vonbastian %>% mutate(congruency = ifelse(congruency == 1, "congruent", "incongruent")))
+
+
+# Extract colors from viridis scale (manually ensuring consistency with first plot)
+colors_used <- unique(ggplot_build(sn_plot_by_data)$data[[1]]$colour)
+splithalf_color <- "darkgrey"  # Choose a distinct color for Splithalf (e.g., red)
+spearmanbrown_color <- "lightgrey"
+
+# Define named color vector ensuring Splithalf is first
+color_mapping <- c(`7` = splithalf_color,
+                   `6` = spearmanbrown_color,
+                   `5` = colors_used[5], 
+                   `4` = colors_used[4], 
+                   `3` = colors_used[3], 
+                   `2` = colors_used[2], 
+                   `1` = colors_used[1])
+
+rel_plot_by_data <- sn_ratios %>%
+  mutate(K = case_when(dataset == "Enkavi et al., 2019" ~ extract_k(enkavi),
+                       dataset == "Pratte et al., 2010" ~ extract_k(pratte),
+                       dataset == "Rey-Mermet et al., 2018" ~ extract_k(reymermet),
+                       dataset == "Von Bastian et al., 2016" ~ extract_k(vonbastian)),
+         rel = gamma_to_reliability(signa, K),
+         rel.lower = gamma_to_reliability(signa.lower, K),
+         rel.upper = gamma_to_reliability(signa.upper, K)) %>% 
+  select(-(signa:signa.upper)) %>% 
+  bind_rows(data.frame(Model = rep(c("Split-half SB","Split-half"), each = 4), 
+                       dataset = c("Enkavi et al., 2019", "Pratte et al., 2010", "Rey-Mermet et al., 2018",
+                                   "Von Bastian et al., 2016"),
+                       idx = rep(6:7, each = 4),
+                       K = NA,
+                       rel = c(sh_enkavi["sb"], sh_pratte["sb"], sh_reymermet["sb"],
+                               sh_vonbastian["sb"],
+                               sh_enkavi["sh"], sh_pratte["sh"], sh_reymermet["sh"],
+                               sh_vonbastian["sh"]), 
+                       rel.lower = c(sh_enkavi["sb.lower"], sh_pratte["sb.lower"], sh_reymermet["sb.lower"],
+                               sh_vonbastian["sb.lower"],
+                               sh_enkavi["sh.lower"], sh_pratte["sh.lower"], sh_reymermet["sh.lower"],
+                               sh_vonbastian["sh.lower"]),
+                       rel.upper = c(sh_enkavi["sb.upper"], sh_pratte["sb.upper"], sh_reymermet["sb.upper"],
+                               sh_vonbastian["sb.upper"],
+                               sh_enkavi["sh.upper"], sh_pratte["sh.upper"], sh_reymermet["sh.upper"],
+                               sh_vonbastian["sh.upper"])))  %>%
+  #mutate(Model = factor(Model, levels = c("Splithalf", "Normal", "Lognormal", "Shifted-lognormal", "Lognormal race", "Racing diffusion"))) %>% 
+  ggplot(aes(y = dataset, x = rel, xmin = rel.lower, 
+             xmax = rel.upper, color = as.character(idx))) +
   geom_pointinterval(position = position_dodge(width = .5)) +
-  scale_color_viridis_d(option = "C", end = 0.8) +
-  scale_y_discrete(labels = c("Racing diffusion", "Lognormal race", "Shifted-lognormal","Lognormal", "Normal")) +
+  scale_color_manual(values = color_mapping, limits = rev, labels = c("Split-half", "Split-half SB","Normal", "Lognormal", "Shifted-lognormal", "Lognormal race", "Racing diffusion")) +  # Manually setting colors
+  scale_y_discrete(limits = rev) +
   ggtitle("") +
-  labs(x = "Signal-to-noise ratio", y = "", color = "") +
+  labs(x = "Reliability", y = "", color = "") +
   geom_vline(xintercept = 0, col = "grey70") +
-  #scale_x_continuous(limits = c(0, 0.38)) +
-  mytheme(base_size = 12)
+  mytheme(base_size = 12) +
+  theme(axis.text.y = element_blank(),    # Remove y-axis text
+        axis.title.y = element_blank())
+
+
+p <- sn_plot_by_data | rel_plot_by_data
 
 ```
 
+
+
 ```{r 'signal-component', cache = TRUE, message = FALSE, warning = FALSE}
-plot_samples <- function(model, title, samples_vB, samples_P, samples_RMy, samples_E,y_labels = FALSE){
-   manual_colors <- c("goldenrod1", "mediumpurple3", "deepskyblue4", "firebrick3")   
+plot_samples <- function(model, title, samples_E, samples_P, samples_RMy, samples_vB, y_labels = FALSE){
+   manual_colors <- c("goldenrod1", "mediumpurple3", "deepskyblue4", "firebrick3")
+   
+   samples <- samples_E %>% 
+  select({{model}}) %>% 
+  mutate(Dataset = "Enkavi et al., 2019") %>% 
+  bind_rows(samples_P %>% 
+              select({{model}}) %>% 
+              mutate(Dataset = "Pratte et al., 2010")) %>% 
+  bind_rows(samples_RMy %>% 
+              select({{model}}) %>% 
+              mutate(Dataset = "Rey-Mermet et al., 2018")) %>% 
+  bind_rows(samples_vB %>% 
+              select({{model}}) %>% 
+              mutate(Dataset = "Von Bastian et al., 2016")) %>% 
+  mutate(Dataset = factor(Dataset, levels = rev(c(
+    "Enkavi et al., 2019",
+    "Pratte et al., 2010",
+    "Rey-Mermet et al., 2018",
+    "Von Bastian et al., 2016"
+  ))))%>%
+  group_by(Dataset) %>%
+  summarize(
+    samples = median({{model}}),
+    samples.lower = quantile({{model}}, 0.025),
+    samples.upper = quantile({{model}}, 0.975)
+  ) %>%
+  ungroup()
+
   
-  samples <- samples_vB %>% 
-    select({{model}}) %>% 
-    mutate(Dataset = "Von Bastian et al., 2016") %>% 
-    bind_rows(samples_P %>% 
-                select({{model}}) %>% 
-                mutate(Dataset = "Pratte et al., 2010")) %>% 
-    bind_rows(samples_RMy %>% 
-                select({{model}}) %>% 
-                mutate(Dataset = "Rey-Mermet et al., 2018")) %>% 
-    bind_rows(samples_E %>% 
-                select({{model}}) %>% 
-                mutate(Dataset = "Enkavi et al., 2019")) %>% 
-    group_by(Dataset) %>% 
-    summarize(samples = median({{model}}),
-              samples.lower = quantile({{model}}, 0.025),
-              samples.upper = quantile({{model}}, 0.975)) %>% 
-    ungroup()
-  
-  samples_plot <- samples %>% 
-    ggplot(aes(y = Dataset, x = samples, xmin = samples.lower, 
-               xmax = samples.upper, color = Dataset)) +
+  samples_plot <- samples  %>%
+  ggplot(aes(y = Dataset, x = samples, xmin = samples.lower, 
+             xmax = samples.upper, color = Dataset)) +
     geom_pointinterval(position = position_dodge(width = .5)) +
     scale_color_manual(values = manual_colors) +
     scale_x_continuous(breaks = seq(min(samples$samples.lower), max(samples$samples.upper), length.out = 4), labels = label_number(accuracy = 0.01)) +
@@ -989,11 +1186,11 @@ plot_samples <- function(model, title, samples_vB, samples_P, samples_RMy, sampl
   return(samples_plot)
 }
 
-p_signal_n <- plot_samples(n, "Normal", signal_vB, signal_P, signal_RMy, signal_E,y_labels = TRUE) + theme(axis.text.x = element_text(size = 8))
-p_signal_ln <- plot_samples(ln, "Lognormal", signal_vB, signal_P, signal_RMy, signal_E)+ theme(axis.text.x = element_text(size = 8))
-p_signal_sln <- plot_samples(sln, "Shifted Lognormal", signal_vB, signal_P, signal_RMy, signal_E) + labs(x = expression("Signal " ~ sigma[theta]))+ theme(axis.text.x = element_text(size = 8))
-p_signal_lnr <- plot_samples(lnr, "Lognormal race", signal_vB, signal_P, signal_RMy, signal_E)+ theme(axis.text.x = element_text(size = 8))
-p_signal_rdm <- plot_samples(rdm, "Racing diffusion", signal_vB, signal_P, signal_RMy, signal_E)+ theme(axis.text.x = element_text(size = 8))
+p_signal_n <- plot_samples(n, "Normal", signal_E, signal_P, signal_RMy,signal_vB, y_labels = TRUE) + theme(axis.text.x = element_text(size = 8))
+p_signal_ln <- plot_samples(ln, "Lognormal", signal_E, signal_P, signal_RMy,signal_vB)+ theme(axis.text.x = element_text(size = 8))
+p_signal_sln <- plot_samples(sln, "Shifted Lognormal", signal_E, signal_P, signal_RMy,signal_vB) + labs(x = expression("Signal " ~ sigma[theta]))+ theme(axis.text.x = element_text(size = 8))
+p_signal_lnr <- plot_samples(lnr, "Lognormal race", signal_E, signal_P, signal_RMy,signal_vB)+ theme(axis.text.x = element_text(size = 8))
+p_signal_rdm <- plot_samples(rdm, "Racing diffusion", signal_E, signal_P, signal_RMy,signal_vB)+ theme(axis.text.x = element_text(size = 8))
 
 p_signal <- p_signal_n | p_signal_ln | p_signal_sln | p_signal_lnr | p_signal_rdm
 ```
@@ -1018,11 +1215,11 @@ noise_P <- get_noise("P")
 noise_RMy <- get_noise("RMy")
 noise_E <- get_noise("E")
 
-p_noise_n <- plot_samples(n, "Normal", noise_vB, noise_P, noise_RMy, noise_E,y_labels = TRUE)+ theme(axis.text.x = element_text(size = 8)) + ggtitle("")
-p_noise_ln <- plot_samples(ln, "Lognormal", noise_vB, noise_P, noise_RMy, noise_E)+ theme(axis.text.x = element_text(size = 8)) + ggtitle("")
-p_noise_sln <- plot_samples(sln, "Shifted Lognormal", noise_vB, noise_P, noise_RMy, noise_E) + labs(x = expression("Noise " ~ sigma))+ theme(axis.text.x = element_text(size = 8)) + ggtitle("")
-p_noise_lnr <- plot_samples(lnr, "Lognormal Race", noise_vB, noise_P, noise_RMy, noise_E)+ theme(axis.text.x = element_text(size = 8)) + ggtitle("")
-p_noise_rdm <- plot_samples(rdm, "Racing Diffusion", noise_vB, noise_P, noise_RMy, noise_E)+ theme(axis.text.x = element_text(size = 7)) + ggtitle("")
+p_noise_n <- plot_samples(n, "Normal",  noise_E, noise_P, noise_RMy,noise_vB, y_labels = TRUE)+ theme(axis.text.x = element_text(size = 8)) + ggtitle("")
+p_noise_ln <- plot_samples(ln, "Lognormal", noise_E, noise_P, noise_RMy,noise_vB)+ theme(axis.text.x = element_text(size = 8)) + ggtitle("")
+p_noise_sln <- plot_samples(sln, "Shifted Lognormal", noise_E, noise_P, noise_RMy,noise_vB) + labs(x = expression("Noise " ~ sigma))+ theme(axis.text.x = element_text(size = 8)) + ggtitle("")
+p_noise_lnr <- plot_samples(lnr, "Lognormal Race", noise_E, noise_P, noise_RMy,noise_vB)+ theme(axis.text.x = element_text(size = 8)) + ggtitle("")
+p_noise_rdm <- plot_samples(rdm, "Racing Diffusion", noise_E, noise_P, noise_RMy,noise_vB)+ theme(axis.text.x = element_text(size = 7)) + ggtitle("")
   
 p_noise <- p_noise_n | p_noise_ln | p_noise_sln | p_noise_lnr | p_noise_rdm
 p_signal / p_noise
@@ -1100,6 +1297,66 @@ ln_corresp <- corresp_plot("ln")
 n_corresp <- corresp_plot("n")
 
 (n_corresp / ln_corresp / sln_corresp / lnr_corresp / rdm_corresp) 
+```
+
+```{r 'supplementary-plots-accuracy'}
+
+plot_mean_acc_hist <- function(data, title) {
+  mean_acc_values <- data %>%
+    group_by(subject) %>%
+    summarize(mean_acc = mean(accuracy, na.rm = TRUE)) %>%
+    pull(mean_acc)
+  
+  median_acc <- median(mean_acc_values, na.rm = TRUE)
+  
+  ggplot(data.frame(mean_acc = mean_acc_values), aes(x = mean_acc)) +
+    geom_histogram(binwidth = 0.01, fill = "blue", color = "black", alpha = 0.7) +
+    geom_vline(aes(xintercept = median_acc), color = "red", linetype = "dashed", linewidth = 1) +
+    labs(title = title,
+         x = "Mean Accuracy",
+         y = "Nr of Participants") +
+    theme_minimal(base_size = 10) +
+    theme(panel.grid = element_blank(),  
+          axis.line.y = element_line(color = "black"),  
+          axis.line.x =element_line(color = "black")) +
+    annotate("text", x = median_acc, y = Inf, label = paste("Median:", round(median_acc, 2)), 
+             vjust = 2, color = "red", size = 3)
+}
+
+plot_nr_incorrect_hist <- function(data, title) {
+  nr_incorrect <- data %>%
+    group_by(subject) %>%
+    summarize(nr_incorrect = sum(accuracy == 0)) %>%
+    pull(nr_incorrect)
+  
+  median_nr_incorrect <- median(nr_incorrect, na.rm = TRUE)
+  
+  ggplot(data.frame(nr_incorrect = nr_incorrect), aes(x = nr_incorrect)) +
+    geom_histogram(fill = "blue", color = "black", alpha = 0.7) +
+    geom_vline(aes(xintercept = median_nr_incorrect), color = "red", linetype = "dashed", linewidth = 1) +
+    labs(title = title,
+         x = "Nr incorrect responses",
+         y = "Nr of Participants") +
+    theme_minimal(base_size = 10) +
+    theme(panel.grid = element_blank(),  
+          axis.line.y = element_line(color = "black"),  
+          axis.line.x =element_line(color = "black")) +
+    annotate("text", x = median_nr_incorrect, y = Inf, label = paste("Median:", round(median_nr_incorrect, 2)), 
+             vjust = 2, hjust = -0.3, color = "red", size = 3)
+}
+
+p_E <- plot_nr_incorrect_hist(enkavi, "Enkavi et al., 2019")
+p_vB <- plot_nr_incorrect_hist(vonbastian, "Von Bastian et al., 2016")
+p_P <- plot_nr_incorrect_hist(pratte, "Pratte et al., 2010")
+p_RM <- plot_nr_incorrect_hist(reymermet, "Rey-Mermet et al., 2018")
+(p_E | p_vB) / (p_P | p_RM)
+
+p_E <- plot_mean_acc_hist(enkavi, "Enkavi et al., 2019")
+p_vB <- plot_mean_acc_hist(vonbastian, "Von Bastian et al., 2016")
+p_P <- plot_mean_acc_hist(pratte, "Pratte et al., 2010")
+p_RM <- plot_mean_acc_hist(reymermet, "Rey-Mermet et al., 2018")
+
+(p_E | p_vB) / (p_P | p_RM)
 ```
 
 
@@ -1316,7 +1573,7 @@ for(L in Llist){
 
 colnames(estList) <- c('L', 'sMeanv1.hat', 'sMeanv2.hat', 'sVarv1.hat', 'sVarv2.hat', 'sCovv', 'Ev1.hat', 'Ev2.hat', 'Vv1.hat', 'Vv2.hat', 'Covv')
 
-png('/Users/udo/Dropbox/to read/DASC model/NumericalExamplesvhatRDM2.png', res = 72*4, height = 480*4, width = 480*4)
+png('NumericalExamplesvhatRDM2.png', res = 72*4, height = 480*4, width = 480*4)
 
 par(mfrow = c(2,2), mar = c(4, 4, 2, 2))
 plot(estList[, 'Ev1.hat'], estList[, 'sMeanv1.hat'], las = 1, bty = 'n', xlab = 'Theoretical Mean', ylab = 'Sample Mean', col=1, pch = 16, cex.axis = 1.3, cex.lab = 1.3, main = expression(hat('v')[1]))
@@ -1334,7 +1591,7 @@ abline(a=0, b=1, lty = 2)
 
 dev.off()
 
-png('/Users/udo/Dropbox/to read/DASC model/NumericalExamplesCovRDM.png', res = 72*4, height = 480*4, width = 480*4)
+png('NumericalExamplesCovRDM.png', res = 72*4, height = 480*4, width = 480*4)
 plot(estList[, 'Covv'], estList[, 'sCovv'], las = 1, bty = 'n', xlab = 'Theoretical Covariance', ylab = 'Sample Covariance', col=1, pch = 16, cex.axis = 1.3, cex.lab = 1.3)
 abline(a=0, b=1, lty = 2)
 dev.off()

@@ -6,8 +6,6 @@ library(dplyr)
 library(tidyr)
 ```
 
-
-
 ```{r 'connect-to-db-file'}
 conn <- DBI::dbConnect(RSQLite::SQLite(), "acdc.db")
 

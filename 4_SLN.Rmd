@@ -706,7 +706,7 @@ ggsave("output/SLN/ind_sln_ic_E.pdf",individual_pp_E$incongruent, height = 5.8, 
 ```
 
 
-```{r 'SLN-SN-ratios-analytical', eval = FALSE}}
+```{r 'SLN-SN-ratios-analytical', eval = FALSE}
 # Von Bastian et al.------------------------------------------------------------
 load("output/SLN/sln_samples_vB.RData") # load previously saved samples
 
